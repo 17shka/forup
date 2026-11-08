@@ -1,0 +1,5 @@
+# Leptos erases concrete component types to keep type nesting within rustc's
+# query depth limit. `cargo leptos` sets this automatically; declaring it here
+# makes plain `cargo build` / `cargo test` work as well.
+[build]
+rustflags = ["--cfg", "erase_components"]

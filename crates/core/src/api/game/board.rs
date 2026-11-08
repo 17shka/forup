@@ -206,6 +206,38 @@ mod game_rule_tests {
             .sum();
         assert!(remaining_mass < 28);
     }
+
+    #[test]
+    fn decreasing_a_zero_cell_does_not_consume_the_turn() {
+        let mut game = Game::standard();
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.start(true).unwrap();
+
+        let pos = game
+            .board
+            .iter()
+            .find(|(_, cell)| cell.owner == Some(tid(1)))
+            .map(|(pos, _)| pos)
+            .expect("team 1 starts with a cell");
+
+        // The first decrease takes the cell from 1 to 0 and advances the turn.
+        game.apply_action(cid(1), GameAction::Decrease(pos))
+            .unwrap();
+        assert_eq!(game.board[pos].value, 0);
+
+        // Put the same member back on turn and try to decrease the empty cell
+        // again: it must be rejected without advancing the turn.
+        game.current_turn = Some(0);
+        let before = game.current_turn;
+
+        assert_eq!(
+            game.apply_action(cid(1), GameAction::Decrease(pos)),
+            Err(GameError::CellCannotBeDecreased)
+        );
+        assert_eq!(game.current_turn, before);
+        assert_eq!(game.board[pos].value, 0);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +249,7 @@ pub enum GameError {
     PositionOutOfBounds,
     FirstMoveRequiresEmptyCell,
     CellNotOwnedByTeam,
+    CellCannotBeDecreased,
     NoMembers,
     NotEnoughMembers,
     NotEnoughTeams,
@@ -615,6 +648,10 @@ impl Game {
             }
         } else if owner.is_some() {
             return Err(GameError::FirstMoveRequiresEmptyCell);
+        }
+
+        if !increase && self.board[pos].value <= self.board[pos].ability.min_value() {
+            return Err(GameError::CellCannotBeDecreased);
         }
 
         let stat = self.stats.entry(member_id).or_default();
@@ -1251,16 +1288,15 @@ impl CellAbility {
     }
 }
 
-const NORMAL_N: usize = disk_cell_count(1);
-const NORMAL_TARGETS: [(I8Vec2, i8); NORMAL_N] =
-    interpolate_by_distance(disk_cells::<NORMAL_N>(1), 0, 0);
-
-// [
-//     (I8Vec2::X, 0),
-//     (I8Vec2::NEG_X, 0),
-//     (I8Vec2::Y, 0),
-//     (I8Vec2::NEG_Y, 0),
-// ];
+/// A regular cell explodes into its four cardinal neighbours only. The centre
+/// is not a target: including it would both raise the explosion threshold and
+/// feed the mass back into the exploding cell.
+const NORMAL_TARGETS: [(I8Vec2, i8); 4] = [
+    (I8Vec2::X, 0),
+    (I8Vec2::NEG_X, 0),
+    (I8Vec2::Y, 0),
+    (I8Vec2::NEG_Y, 0),
+];
 
 const BOMB_N: usize = disk_cell_count(2);
 const BOMB_TARGETS: [(I8Vec2, i8); BOMB_N] =

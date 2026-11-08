@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/server",
-    "crates/client/leptos",
+    "crates/client",
 ]
 
 [workspace.package]
@@ -15,6 +15,25 @@ license = "GNU"
 forup-core = { path = "crates/core" }
 glam = { version = "0.34.3", features = ["serde"] } # math
 
+[[workspace.metadata.leptos]]
+name = "forup"
+bin-package = "server"
+bin-target = "server"
+lib-package = "client"
+output-name = "forup"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "crates/client/style.css"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+browserquery = "defaults"
+env = "DEV"
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+lib-profile-release = "wasm-release"
+
 [profile.release]
 opt-level = "s"
 lto = true
@@ -22,3 +41,10 @@ codegen-units = 1
 panic = "abort"
 strip = true
 debug = false
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

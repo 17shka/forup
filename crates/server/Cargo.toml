@@ -7,6 +7,26 @@ edition.workspace = true
 name = "server"
 path = "src/main.rs"
 
+[features]
+default = []
+ssr = [
+    "dep:axum",
+    "dep:leptos_axum",
+    "dep:tokio",
+    "client/ssr",
+    "leptos/ssr",
+]
+
 [dependencies]
 forup-core.workspace = true
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
+client = { path = "../client", default-features = false }
+axum = { version = "0.8", optional = true }
+leptos = { version = "0.8.23", default-features = false }
+leptos_axum = { version = "0.8.7", optional = true }
+tokio = { version = "1.54.1", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "fs",
+    "net",
+], optional = true }
