@@ -1,0 +1,27 @@
+{
+  "file_scan_exclusions": [
+    ".git",
+    "Cargo.lock",
+
+    "crates/client/flutter/lib/l10n/*.dart",
+    "crates/client/flutter/android",
+    "crates/client/flutter/ios",
+    "crates/client/flutter/linux",
+    "crates/client/flutter/macos",
+    "crates/client/flutter/web",
+    "crates/client/flutter/windows",
+    "crates/client/flutter/.dart_tool",
+    "crates/client/flutter/rust_builder",
+    "crates/client/flutter/build",
+    "crates/client/flutter/lib/src/rust",
+    "crates/client/flutter/rust/src/frb_generated.rs",
+    "crates/client/flutter/rust/Cargo.lock",
+    "crates/client/flutter/.flutter-plugins-dependencies",
+    "crates/client/flutter/.metadata",
+    "crates/client/flutter/analysis_options.yaml",
+    "crates/client/flutter/flutter_rust_bridge.yaml",
+    "crates/client/flutter/l10n.yaml",
+    "crates/client/flutter/pubspec.lock",
+    "crates/client/flutter/rust/target",
+  ]
+}

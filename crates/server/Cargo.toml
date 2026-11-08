@@ -1,0 +1,12 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+forup-core.workspace = true
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "fs"] }
