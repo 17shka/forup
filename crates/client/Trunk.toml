@@ -1,0 +1,10 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Must match the GitHub Pages project path used by the deploy workflow.
+public_url = "/forup/"
+features = ["csr"]
+no_default_features = true
+
+[serve]
+port = 8080

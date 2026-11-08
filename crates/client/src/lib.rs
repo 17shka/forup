@@ -14,3 +14,11 @@ pub fn hydrate() {
     console_error_panic_hook::set_once();
     leptos::mount::hydrate_body(app::App);
 }
+
+/// Entry point for static, client-side rendered builds (e.g. GitHub Pages).
+#[cfg(feature = "csr")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+    leptos::mount::mount_to_body(app::App);
+}

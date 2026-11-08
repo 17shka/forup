@@ -35,18 +35,29 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 pub fn App() -> impl IntoView {
     provide_meta_context();
 
+    // `cargo leptos` serves the stylesheet from `/pkg`; static builds bundled
+    // by Trunk inject it through `index.html` instead.
+    let stylesheet =
+        (!cfg!(feature = "csr")).then(|| view! { <Stylesheet id="leptos" href="/pkg/forup.css"/> });
+
     view! {
-        <Stylesheet id="leptos" href="/pkg/forup.css"/>
+        {stylesheet}
         <Title text="Forup"/>
 
         <I18nContextProvider enable_cookie=false>
             <SettingsScope>
-                <Router>
+                <Router base=router_base()>
                     <AppShell/>
                 </Router>
             </SettingsScope>
         </I18nContextProvider>
     }
+}
+
+/// Client-side builds are deployed as a GitHub Pages project site under
+/// `/forup/`, so the router has to strip that prefix from browser URLs.
+fn router_base() -> &'static str {
+    if cfg!(feature = "csr") { "/forup" } else { "" }
 }
 
 #[component]

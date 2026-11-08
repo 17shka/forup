@@ -10,6 +10,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "GNU"
+repository = "https://github.com/17shka/forup"
 
 [workspace.dependencies]
 forup-core = { path = "crates/core" }

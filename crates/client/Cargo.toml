@@ -21,6 +21,14 @@ hydrate = [
     "dep:wasm-bindgen",
 ]
 
+csr = [
+    "leptos/csr",
+    "thaw/csr",
+    "leptos_i18n/csr",
+    "dep:console_error_panic_hook",
+    "dep:wasm-bindgen",
+]
+
 ssr = [
     "leptos/ssr",
     "leptos_meta/ssr",
