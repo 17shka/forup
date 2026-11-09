@@ -57,13 +57,12 @@ impl Room {
             .is_some_and(|member| member.controller == MemberId::Bot);
         let is_human_turn = game.is_started() && !is_bot_turn;
         let needs_first_move = current_member_id.is_some_and(|id| game.is_starting_action(id));
-        let width = u16::from(game.board.size().x);
         let legal_moves = current_member_id
             .filter(|_| is_human_turn)
             .map(|id| {
                 game.move_weights(id, &BotConfig::STANDARD)
                     .into_iter()
-                    .map(|(position, _)| u16::from(position.y) * width + u16::from(position.x))
+                    .map(|(position, _)| u16::from(position.slot()))
                     .collect()
             })
             .unwrap_or_default();
@@ -118,8 +117,8 @@ impl Room {
         });
 
         GameViewState {
-            width: width as u8,
-            height: game.board.size().y,
+            width: game.board.size().w(),
+            height: game.board.size().h(),
             cells: game.board.cells().clone(),
             legal_moves,
             members,

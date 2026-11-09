@@ -14,7 +14,6 @@ repository = "https://github.com/17shka/forup"
 
 [workspace.dependencies]
 forup-core = { path = "crates/core" }
-glam = { version = "0.34.3", features = ["serde"] } # math
 
 [[workspace.metadata.leptos]]
 name = "forup"

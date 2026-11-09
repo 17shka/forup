@@ -3,13 +3,56 @@
 //!
 //! Везде `radius_sq` — квадрат радиуса (радиус = `sqrt(radius_sq)`),
 //! поэтому расстояния сравниваются в целых числах без извлечения корня.
-
-use glam::I8Vec2;
+//!
+//! Клетки в диске адресуются компактным кодом направления: `0` — центр,
+//! `1..=8` — соседи по часовой стрелке начиная с верхнего:
+//!
+//! ```text
+//! 8 1 2
+//! 7 0 3
+//! 6 5 4
+//! ```
 
 pub mod prelude {
     pub use super::{
-        disk_cell_count, disk_cells, interpolate_by_distance, max_radius_sq_for_players,
+        direction_offset, disk_cell_count, disk_cells, interpolate_by_distance,
+        max_radius_sq_for_players,
     };
+}
+
+/// Наибольший квадрат радиуса, который ещё помещается в коды направлений:
+/// полный диск `3 × 3` вокруг центра.
+pub const MAX_DIRECTION_RADIUS_SQ: u8 = 2;
+
+/// Смещение `(dx, dy)` для кода направления.
+pub const fn direction_offset(direction: u8) -> (i8, i8) {
+    match direction {
+        1 => (0, -1),
+        2 => (1, -1),
+        3 => (1, 0),
+        4 => (1, 1),
+        5 => (0, 1),
+        6 => (-1, 1),
+        7 => (-1, 0),
+        8 => (-1, -1),
+        _ => (0, 0),
+    }
+}
+
+/// Код направления для смещения внутри диска `3 × 3`.
+/// Для смещений за пределами диска возвращает `0`.
+const fn direction_from_offset(dx: i8, dy: i8) -> u8 {
+    match (dx, dy) {
+        (0, -1) => 1,
+        (1, -1) => 2,
+        (1, 0) => 3,
+        (1, 1) => 4,
+        (0, 1) => 5,
+        (-1, 1) => 6,
+        (-1, 0) => 7,
+        (-1, -1) => 8,
+        _ => 0,
+    }
 }
 
 /// Целая часть квадратного корня из `n`, то есть `floor(sqrt(n))`.
@@ -39,10 +82,11 @@ pub const fn const_sqrt_f32(x: f32) -> f32 {
     guess
 }
 
-/// Квадрат расстояния от точки до начала координат: `x² + y²`.
-const fn dist_sq(point: I8Vec2) -> i32 {
-    let x = point.x as i32;
-    let y = point.y as i32;
+/// Квадрат расстояния от клетки до центра: `x² + y²`.
+const fn dist_sq(direction: u8) -> i32 {
+    let (x, y) = direction_offset(direction);
+    let x = x as i32;
+    let y = y as i32;
     x * x + y * y
 }
 
@@ -66,23 +110,31 @@ pub const fn disk_cell_count(radius_sq: u8) -> usize {
     count
 }
 
-/// Все точки диска из [`disk_cell_count`]. Порядок: строки по `y` от меньшего к большему,
-/// внутри строки по `x` от меньшего к большему.
+/// Все точки диска из [`disk_cell_count`], закодированные как направления.
+/// Порядок: строки по `y` от меньшего к большему, внутри строки по `x` от меньшего к большему.
+///
+/// Коды направлений описывают только диск `3 × 3`, поэтому `radius_sq`
+/// не должен превышать [`MAX_DIRECTION_RADIUS_SQ`]. Нарушение приводит к ошибке
+/// на этапе вычисления константы.
 ///
 /// `N` должно равняться `disk_cell_count(radius_sq)`. Если `N` меньше,
 /// возникнет ошибка выхода за границы массива при вычислении константы.
 /// Если `N` больше, хвост массива останется нулевым.
-pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [I8Vec2; N] {
+pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [u8; N] {
+    assert!(
+        radius_sq <= MAX_DIRECTION_RADIUS_SQ,
+        "direction codes only describe the 3x3 neighbourhood"
+    );
     let radius_sq = radius_sq as i32;
     let max_coord = floor_sqrt(radius_sq);
-    let mut cells = [I8Vec2::ZERO; N];
+    let mut cells = [0; N];
     let mut index = 0;
     let mut y = -max_coord;
     while y <= max_coord {
         let mut x = -max_coord;
         while x <= max_coord {
             if x * x + y * y <= radius_sq {
-                cells[index] = I8Vec2::new(x as i8, y as i8);
+                cells[index] = direction_from_offset(x as i8, y as i8);
                 index += 1;
             }
             x += 1;
@@ -92,16 +144,16 @@ pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [I8Vec2; N] {
     cells
 }
 
-/// Присваивает каждой точке значение, линейно зависящее от её расстояния до начала координат.
+/// Присваивает каждой клетке значение, линейно зависящее от её расстояния до центра.
 ///
-/// Точка в начале координат получает `min_value`, самая удалённая точка получает `max_value`.
+/// Центр получает `min_value`, самая удалённая клетка получает `max_value`.
 /// Промежуточные значения округляются до ближайшего целого, при равной дробной части
-/// округление идёт от нуля. Если все точки совпадают с началом, все получают `min_value`.
+/// округление идёт от нуля. Если все клетки совпадают с центром, все получают `min_value`.
 pub const fn interpolate_by_distance<const N: usize>(
-    points: [I8Vec2; N],
+    points: [u8; N],
     min_value: i8,
     max_value: i8,
-) -> [(I8Vec2, i8); N] {
+) -> [(u8, i8); N] {
     let mut max_dist_sq = 0;
     let mut i = 0;
     while i < N {
@@ -116,7 +168,7 @@ pub const fn interpolate_by_distance<const N: usize>(
     let min_f = min_value as f32;
     let max_f = max_value as f32;
 
-    let mut result = [(I8Vec2::ZERO, 0); N];
+    let mut result = [(0, 0); N];
     let mut i = 0;
     while i < N {
         let point = points[i];
@@ -200,7 +252,7 @@ pub const fn max_radius_sq_for_players<const WIDTH: usize, const HEIGHT: usize>(
     let mut radius_sq: u8 = 0;
     loop {
         let max_cells = max_blast_cell_count::<WIDTH, HEIGHT>(radius_sq as i32);
-        let min_blasts = (total_cells + max_cells - 1) / max_cells;
+        let min_blasts = total_cells.div_ceil(max_cells);
         if min_blasts < players {
             break;
         }
@@ -221,19 +273,19 @@ mod tests {
     const BOMB_CELL_COUNT: usize = disk_cell_count(2);
 
     /// Затухание для диска радиуса² = 2: от -3 в центре до -1 на диагонали.
-    const BOMB_FALLOFF: [(I8Vec2, i8); BOMB_CELL_COUNT] =
+    const BOMB_FALLOFF: [(u8, i8); BOMB_CELL_COUNT] =
         interpolate_by_distance(disk_cells::<BOMB_CELL_COUNT>(2), -3, -1);
 
     const _: () = assert!(BOMB_CELL_COUNT == 9);
 
     #[test]
     fn falloff_center_has_min_value() {
-        assert_eq!(BOMB_FALLOFF[4], (I8Vec2::ZERO, -3));
+        assert_eq!(BOMB_FALLOFF[4], (0, -3));
     }
 
     #[test]
     fn falloff_corner_has_max_value() {
-        assert_eq!(BOMB_FALLOFF[0], (I8Vec2::new(-1, -1), -1));
+        assert_eq!(BOMB_FALLOFF[0], (8, -1));
     }
 
     #[test]

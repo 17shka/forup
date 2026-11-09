@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 
 use forup_core::api::game::board::prelude::*;
 use forup_core::api::network::Uuid;
-use glam::U8Vec2;
 use leptos::prelude::*;
 
 /// Deterministic identity for the first human seat so server-rendered markup
@@ -63,7 +62,7 @@ pub enum MoveMode {
 }
 
 impl MoveMode {
-    pub fn action(self, pos: U8Vec2) -> GameAction {
+    pub fn action(self, pos: BoardSize) -> GameAction {
         match self {
             Self::Increase => GameAction::Increase(pos),
             Self::Decrease => GameAction::Decrease(pos),
@@ -164,19 +163,29 @@ impl LocalGame {
         Uuid::new(FIRST_OWNER).ok_or(GameError::CharacterIdSpaceExhausted)
     }
 
-    fn next_bot_number(&self) -> u8 {
-        let max = self
-            .participants
+    fn used_bot_numbers(&self) -> BTreeSet<u8> {
+        self.participants
             .iter()
             .filter_map(|participant| match participant.controller {
                 Controller::Bot(number) => Some(number),
                 Controller::Human => None,
             })
-            .max()
-            .unwrap_or(0);
-        max.saturating_add(1).max(1)
+            .collect()
     }
 
+    fn lowest_free_bot_number(used: &BTreeSet<u8>) -> u8 {
+        (1..=u8::MAX)
+            .find(|number| !used.contains(number))
+            .unwrap_or(u8::MAX)
+    }
+
+    fn next_bot_number(&self) -> u8 {
+        Self::lowest_free_bot_number(&self.used_bot_numbers())
+    }
+
+    /// Adds another character to a participant. The lobby UI works with one
+    /// participant per seat, so this is only kept for engine-level use.
+    #[allow(dead_code)]
     pub fn add_character(
         &mut self,
         participant_id: ParticipantId,
@@ -235,6 +244,8 @@ impl LocalGame {
         Ok(())
     }
 
+    /// Removes one character from a participant. Not exposed by the lobby UI.
+    #[allow(dead_code)]
     pub fn remove_character(
         &mut self,
         participant_id: ParticipantId,
@@ -304,25 +315,58 @@ impl LocalGame {
         Ok(())
     }
 
-    /// Every controller the lobby can assign, including one fresh bot number so
-    /// a new bot can be created from the participant row itself.
+    /// Every controller the lobby can assign: the occupied bot numbers plus the
+    /// lowest free one, so a new bot can be created from the participant row
+    /// itself without the list growing on every selection.
     pub fn controller_options(&self) -> Vec<Controller> {
-        let max = self
+        let mut numbers = self.used_bot_numbers();
+        let next = Self::lowest_free_bot_number(&numbers);
+        numbers.insert(next);
+
+        let mut options = Vec::with_capacity(numbers.len() + 1);
+        options.push(Controller::Human);
+        options.extend(numbers.into_iter().map(Controller::Bot));
+        options
+    }
+
+    pub fn participant_controller(&self, participant_id: ParticipantId) -> Option<Controller> {
+        self.participants
+            .iter()
+            .find(|participant| participant.id == participant_id)
+            .map(|participant| participant.controller)
+    }
+
+    pub fn participant_team(&self, participant_id: ParticipantId) -> Option<TeamId> {
+        let participant = self
             .participants
             .iter()
-            .filter_map(|participant| match participant.controller {
-                Controller::Bot(number) => Some(number),
-                Controller::Human => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(3);
+            .find(|participant| participant.id == participant_id)?;
+        participant
+            .characters
+            .iter()
+            .find_map(|character| self.game.characters.get(character).map(|data| data.team_id))
+    }
 
-        let mut options = Vec::with_capacity(usize::from(max) + 1);
-        options.push(Controller::Human);
-        options.extend((1..=max).map(Controller::Bot));
-        options
+    pub fn participant_stats(&self, participant_id: ParticipantId) -> (u16, u16, u16) {
+        let Some(participant) = self
+            .participants
+            .iter()
+            .find(|participant| participant.id == participant_id)
+        else {
+            return (0, 0, 0);
+        };
+
+        let mut wins = 0u16;
+        let mut losses = 0u16;
+        let mut moves = 0u16;
+        for character in &participant.characters {
+            if let Some(stat) = self.game.stats.get(character) {
+                wins = wins.saturating_add(u16::from(stat.wins));
+                losses = losses.saturating_add(u16::from(stat.losses));
+                moves = moves.saturating_add(stat.total_moves());
+            }
+        }
+        (wins, losses, moves)
     }
 
     /// Moves every character of a participant to the chosen team. The lobby UI
@@ -353,13 +397,12 @@ impl LocalGame {
 
     // --- match settings ---------------------------------------------------
 
-    pub fn board_size(&self) -> U8Vec2 {
+    pub fn board_size(&self) -> BoardSize {
         self.game.board.size()
     }
 
-    /// Resizes the board. Only allowed outside a running match; the engine
-    /// clamps the size to its supported range.
-    pub fn set_board_size(&mut self, size: U8Vec2) -> Result<(), GameError> {
+    /// Resizes the board. Only allowed outside a running match.
+    pub fn set_board_size(&mut self, size: BoardSize) -> Result<(), GameError> {
         self.enter_edit_mode();
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted);
@@ -377,6 +420,21 @@ impl LocalGame {
         self.enter_edit_mode();
         if !self.game.is_started() {
             self.game.automatic_distribution = value;
+        }
+    }
+
+    pub fn lossless_explosions(&self) -> bool {
+        self.game.explosion_mode == ExplosionMode::Lossless
+    }
+
+    pub fn set_lossless_explosions(&mut self, value: bool) {
+        self.enter_edit_mode();
+        if !self.game.is_started() {
+            self.game.explosion_mode = if value {
+                ExplosionMode::Lossless
+            } else {
+                ExplosionMode::Lossy
+            };
         }
     }
 
@@ -490,7 +548,7 @@ impl LocalGame {
     }
 
     /// A legal target for the current human seat's next action.
-    pub fn can_move_to(&self, pos: U8Vec2) -> bool {
+    pub fn can_move_to(&self, pos: BoardSize) -> bool {
         if !self.is_human_turn() || !self.game.board.contains(pos) {
             return false;
         }
@@ -524,7 +582,7 @@ impl LocalGame {
         Ok(())
     }
 
-    pub fn make_move(&mut self, pos: U8Vec2, mode: MoveMode) -> Result<(), GameError> {
+    pub fn make_move(&mut self, pos: BoardSize, mode: MoveMode) -> Result<(), GameError> {
         let character = self.require_human_turn()?;
         self.submit(character, mode.action(pos))
     }
@@ -600,16 +658,20 @@ impl LocalGame {
         ((u32::from(TEAM_HUE_OFFSET) + index * 360 / count) % 360) as u16
     }
 
+    /// Occupied teams plus the lowest free one, so every current value stays
+    /// selectable while the list never grows unnecessarily.
     pub fn team_options(&self) -> Vec<TeamId> {
-        let max = self
+        let mut numbers: BTreeSet<u8> = self
             .game
             .characters
             .values()
             .map(|character| character.team_id.get())
-            .max()
-            .unwrap_or(0);
-        let max = max.saturating_add(1).min(u8::MAX).max(2);
-        (1..=max).filter_map(TeamId::new).collect()
+            .collect();
+        let next = (1..=u8::MAX)
+            .find(|number| !numbers.contains(number))
+            .unwrap_or(u8::MAX);
+        numbers.insert(next);
+        numbers.into_iter().filter_map(TeamId::new).collect()
     }
 
     #[allow(dead_code)]
@@ -693,10 +755,11 @@ impl LocalGame {
             .collect()
     }
 
-    pub fn change_at(&self, pos: U8Vec2) -> i16 {
-        let width = usize::from(self.game.board.size().x);
-        let index = usize::from(pos.y) * width + usize::from(pos.x);
-        self.changes.get(index).copied().unwrap_or(0)
+    pub fn change_at(&self, pos: BoardSize) -> i16 {
+        self.changes
+            .get(usize::from(pos.slot()))
+            .copied()
+            .unwrap_or(0)
     }
 
     // --- internals --------------------------------------------------------
@@ -869,6 +932,8 @@ pub struct GameSession {
     pub state: RwSignal<LocalGame>,
     pub error: RwSignal<Option<GameError>>,
     pub mode: RwSignal<MoveMode>,
+    /// Visual quarter-turns of the board, clockwise.
+    pub rotation: RwSignal<u8>,
 }
 
 impl GameSession {
@@ -877,6 +942,7 @@ impl GameSession {
             state: RwSignal::new(LocalGame::new()),
             error: RwSignal::new(None),
             mode: RwSignal::new(MoveMode::Increase),
+            rotation: RwSignal::new(0),
         };
         provide_context(session);
         session
@@ -896,6 +962,13 @@ impl GameSession {
     pub fn reset(&self) {
         self.state.update(LocalGame::reset);
         self.error.set(None);
+        self.rotation.set(0);
+    }
+
+    /// Rotates the board view 90° clockwise without touching the game state.
+    pub fn rotate_board(&self) {
+        self.rotation
+            .update(|turn| *turn = turn.wrapping_add(1) % 4);
     }
 }
 
@@ -909,7 +982,7 @@ mod tests {
         game
     }
 
-    fn current_human_cell(game: &LocalGame) -> U8Vec2 {
+    fn current_human_cell(game: &LocalGame) -> BoardSize {
         let team = game.current_team().expect("a human team owns the turn");
         game.game
             .board
@@ -1033,16 +1106,51 @@ mod tests {
     #[test]
     fn match_settings_are_applied_on_start() {
         let mut game = LocalGame::new();
-        game.set_board_size(U8Vec2::new(5, 7)).unwrap();
+        let size = BoardSize::new(5, 7).unwrap();
+        game.set_board_size(size).unwrap();
         game.set_automatic_distribution(false);
 
-        assert_eq!(game.board_size(), U8Vec2::new(5, 7));
+        assert_eq!(game.board_size(), size);
         assert!(!game.automatic_distribution());
 
         game.ready().unwrap();
 
         assert!(!game.automatic_distribution());
         assert!(game.game.board.iter().all(|(_, cell)| cell.owner.is_none()));
+    }
+
+    fn tid(id: u8) -> TeamId {
+        TeamId::new(id).unwrap()
+    }
+
+    #[test]
+    fn team_options_keep_the_current_team_available() {
+        let mut game = LocalGame::new();
+        assert_eq!(game.team_options(), vec![tid(1), tid(2), tid(3)]);
+
+        let bot = game
+            .participants
+            .iter()
+            .find(|participant| matches!(participant.controller, Controller::Bot(1)))
+            .map(|participant| participant.id)
+            .unwrap();
+        game.set_participant_team(bot, tid(5)).unwrap();
+
+        assert_eq!(game.participant_team(bot), Some(tid(5)));
+        assert_eq!(game.team_options(), vec![tid(1), tid(2), tid(5)]);
+    }
+
+    #[test]
+    fn explosion_mode_is_a_match_setting() {
+        let mut game = LocalGame::new();
+        assert!(!game.lossless_explosions());
+
+        game.set_lossless_explosions(true);
+        assert!(game.lossless_explosions());
+
+        game.ready().unwrap();
+        game.set_lossless_explosions(false);
+        assert!(game.lossless_explosions());
     }
 
     #[test]
@@ -1075,6 +1183,49 @@ mod tests {
                 .map(|data| data.controller),
             Some(MemberId::Player(_))
         ));
+    }
+
+    #[test]
+    fn controller_options_reuse_free_bot_numbers() {
+        let mut game = LocalGame::new();
+        assert_eq!(
+            game.controller_options(),
+            vec![Controller::Human, Controller::Bot(1), Controller::Bot(2)]
+        );
+
+        let bot = game
+            .participants
+            .iter()
+            .find(|participant| matches!(participant.controller, Controller::Bot(1)))
+            .map(|participant| participant.id)
+            .unwrap();
+
+        // Picking the free number must not create another free number.
+        game.set_participant_controller(bot, Controller::Bot(2))
+            .unwrap();
+        assert_eq!(
+            game.controller_options(),
+            vec![Controller::Human, Controller::Bot(1), Controller::Bot(2)]
+        );
+
+        game.set_participant_controller(bot, Controller::Bot(1))
+            .unwrap();
+        assert_eq!(
+            game.controller_options(),
+            vec![Controller::Human, Controller::Bot(1), Controller::Bot(2)]
+        );
+    }
+
+    #[test]
+    fn adding_a_bot_uses_the_lowest_free_number() {
+        let mut game = LocalGame::new();
+        let added = game.add_bot().unwrap();
+        let added = game
+            .participants
+            .iter()
+            .find(|participant| participant.id == added)
+            .unwrap();
+        assert_eq!(added.controller, Controller::Bot(2));
     }
 
     #[test]

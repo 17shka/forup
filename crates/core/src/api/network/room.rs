@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU8;
 
-use glam::U8Vec2;
-
 use crate::api::game::board::{
-    Board, BotConfig, CharacterId, Game, GameAction, GameError, MemberId, TeamId, Timeline,
+    Board, BoardSize, BotConfig, CharacterId, ExplosionMode, Game, GameAction, GameError, MemberId,
+    TeamId, Timeline,
 };
 use crate::api::game::storage::{GameId, GameMetadata, GameStore, HistoryError};
 use serde::{Deserialize, Serialize};
@@ -12,6 +11,193 @@ use serde::{Deserialize, Serialize};
 use super::{Uuid, UuidExt};
 
 pub type RoomId = Uuid;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Rights {
+    #[default]
+    Nope,
+    Own,
+    All,
+}
+
+impl Rights {
+    /// Whether this right allows acting on a character, given that it belongs
+    /// to the acting player.
+    pub fn allows(self, is_own: bool) -> bool {
+        match self {
+            Rights::Nope => false,
+            Rights::Own => is_own,
+            Rights::All => true,
+        }
+    }
+}
+
+/// Per-member overrides. An unset field inherits the room-wide [`GameRights`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PlayerRights {
+    teams: Option<Rights>,
+    // добавлять/удалять/изменять владельца
+    characters: Option<bool>,
+    game_rule: Option<bool>,
+}
+
+impl PlayerRights {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_teams(mut self, teams: Rights) -> Self {
+        self.teams = Some(teams);
+        self
+    }
+
+    pub fn with_characters(mut self, allowed: bool) -> Self {
+        self.characters = Some(allowed);
+        self
+    }
+
+    pub fn with_game_rule(mut self, allowed: bool) -> Self {
+        self.game_rule = Some(allowed);
+        self
+    }
+
+    pub fn teams(&self) -> Option<Rights> {
+        self.teams
+    }
+
+    pub fn characters(&self) -> Option<bool> {
+        self.characters
+    }
+
+    pub fn game_rule(&self) -> Option<bool> {
+        self.game_rule
+    }
+}
+
+/// Room-wide game rights. Members may override them individually through
+/// [`PlayerRights`], while administrators ([`MemberRights::All`]) always have
+/// every right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GameRights {
+    teams: Rights,
+    characters: bool,
+    game_rule: bool,
+}
+
+impl Default for GameRights {
+    fn default() -> Self {
+        // By default everyone may move their own characters, while the roster
+        // and the rules stay in the administrator's hands.
+        Self {
+            teams: Rights::Own,
+            characters: false,
+            game_rule: false,
+        }
+    }
+}
+
+impl GameRights {
+    pub fn new(teams: Rights, characters: bool, game_rule: bool) -> Self {
+        Self {
+            teams,
+            characters,
+            game_rule,
+        }
+    }
+
+    pub fn teams(&self) -> Rights {
+        self.teams
+    }
+
+    pub fn characters(&self) -> bool {
+        self.characters
+    }
+
+    pub fn game_rule(&self) -> bool {
+        self.game_rule
+    }
+
+    pub fn with_teams(mut self, teams: Rights) -> Self {
+        self.teams = teams;
+        self
+    }
+
+    pub fn with_characters(mut self, characters: bool) -> Self {
+        self.characters = characters;
+        self
+    }
+
+    pub fn with_game_rule(mut self, game_rule: bool) -> Self {
+        self.game_rule = game_rule;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum MemberRights {
+    /// Administrator: every right, regardless of the room policy.
+    All,
+    /// Regular member: inherits the room policy and may override it.
+    Custom(PlayerRights),
+}
+
+impl Default for MemberRights {
+    fn default() -> Self {
+        MemberRights::Custom(PlayerRights::default())
+    }
+}
+
+impl MemberRights {
+    pub fn is_admin(self) -> bool {
+        matches!(self, MemberRights::All)
+    }
+
+    /// Resolves the member's rights against the room-wide policy.
+    pub fn resolve(self, game: &GameRights) -> GameRights {
+        match self {
+            MemberRights::All => GameRights::new(Rights::All, true, true),
+            MemberRights::Custom(player) => GameRights {
+                teams: player.teams.unwrap_or(game.teams),
+                characters: player.characters.unwrap_or(game.characters),
+                game_rule: player.game_rule.unwrap_or(game.game_rule),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MemberData {
+    status: Status,
+    rights: MemberRights,
+}
+
+impl MemberData {
+    pub fn new(status: Status, rights: MemberRights) -> Self {
+        Self { status, rights }
+    }
+
+    /// The room creator and any promoted administrator.
+    pub fn admin(status: Status) -> Self {
+        Self::new(status, MemberRights::All)
+    }
+
+    /// A regular member that inherits the room-wide policy.
+    pub fn player(status: Status) -> Self {
+        Self::new(status, MemberRights::Custom(PlayerRights::default()))
+    }
+
+    pub fn status(&self) -> Status {
+        self.status
+    }
+
+    pub fn rights(&self) -> MemberRights {
+        self.rights
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.rights.is_admin()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Status {
@@ -25,7 +211,7 @@ pub enum Status {
 pub enum RoomMode {
     Offline,
     Online {
-        global: bool,
+        global: bool, //lan/wan
         open: bool,
         // password
         // max_members
@@ -40,6 +226,9 @@ pub enum RoomError {
     PermissionDenied,
     MembersNotReady,
     CannotKickOwner,
+    CannotDemoteOwner,
+    MemberNotFound,
+    InvalidBoardSize,
     Closed,
     Offline,
     GlobalTransportUnavailable,
@@ -56,9 +245,10 @@ impl From<GameError> for RoomError {
 #[derive(Clone, Debug)]
 pub struct Room {
     id: RoomId,
-    owner: Uuid,
     mode: RoomMode,
-    members: HashMap<Uuid, Status>,
+    members: HashMap<Uuid, MemberData>,
+    /// Room-wide policy used by members without an override.
+    rights: GameRights,
     bots: HashMap<CharacterId, BotConfig>,
     game: Game,
     has_started: bool,
@@ -77,9 +267,9 @@ impl Room {
             .expect("a new room must have space for its owner");
         Self {
             id,
-            owner,
             mode,
-            members: HashMap::from([(owner, Status::NotReady)]),
+            members: HashMap::from([(owner, MemberData::admin(Status::NotReady))]),
+            rights: GameRights::default(),
             bots: HashMap::new(),
             game,
             has_started: false,
@@ -101,16 +291,44 @@ impl Room {
         self.game_id
     }
 
-    pub fn owner(&self) -> Uuid {
-        self.owner
+    pub fn owner(&self) -> Option<Uuid> {
+        self.members
+            .iter()
+            .filter(|(_, data)| data.is_admin())
+            .map(|(id, _)| *id)
+            .min()
     }
 
     pub fn mode(&self) -> RoomMode {
         self.mode
     }
 
-    pub fn members(&self) -> &HashMap<Uuid, Status> {
+    pub fn members(&self) -> &HashMap<Uuid, MemberData> {
         &self.members
+    }
+
+    pub fn member(&self, id: Uuid) -> Option<&MemberData> {
+        self.members.get(&id)
+    }
+
+    pub fn member_rights(&self, id: Uuid) -> Option<MemberRights> {
+        self.members.get(&id).map(MemberData::rights)
+    }
+
+    /// The room-wide policy shared by members without an override.
+    pub fn rights(&self) -> GameRights {
+        self.rights
+    }
+
+    /// Rights a member actually has after applying their personal overrides.
+    pub fn effective_rights(&self, id: Uuid) -> Option<GameRights> {
+        self.members
+            .get(&id)
+            .map(|member| member.rights.resolve(&self.rights))
+    }
+
+    pub fn is_admin(&self, id: Uuid) -> bool {
+        self.members.get(&id).is_some_and(MemberData::is_admin)
     }
 
     pub fn bots(&self) -> &HashMap<CharacterId, BotConfig> {
@@ -142,7 +360,7 @@ impl Room {
     /// Adds an extra hot-seat seat controlled by the owner. Local seats are not
     /// room members: they never gate `start` on readiness.
     pub fn add_local_member(&mut self, actor: Uuid) -> Result<CharacterId, RoomError> {
-        self.ensure_owner(actor)?;
+        self.ensure_characters(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -157,7 +375,7 @@ impl Room {
         member_id: CharacterId,
         is_bot: bool,
     ) -> Result<(), RoomError> {
-        self.ensure_owner(actor)?;
+        self.ensure_characters(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -177,11 +395,12 @@ impl Room {
     }
 
     pub fn set_board_size(&mut self, actor: Uuid, width: u8, height: u8) -> Result<(), RoomError> {
-        self.ensure_owner(actor)?;
+        self.ensure_game_rule(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
-        self.game.board.set_size(U8Vec2::new(width, height));
+        let size = BoardSize::new(width, height).ok_or(RoomError::InvalidBoardSize)?;
+        self.game.board.set_size(size);
         Ok(())
     }
 
@@ -190,7 +409,7 @@ impl Room {
         actor: Uuid,
         automatic: bool,
     ) -> Result<(), RoomError> {
-        self.ensure_owner(actor)?;
+        self.ensure_game_rule(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -198,11 +417,72 @@ impl Room {
         Ok(())
     }
 
+    pub fn set_lossless_explosions(
+        &mut self,
+        actor: Uuid,
+        lossless: bool,
+    ) -> Result<(), RoomError> {
+        self.ensure_game_rule(actor)?;
+        if self.game.is_started() {
+            return Err(GameError::GameAlreadyStarted.into());
+        }
+        self.game.explosion_mode = if lossless {
+            ExplosionMode::Lossless
+        } else {
+            ExplosionMode::Lossy
+        };
+        Ok(())
+    }
+
+    /// Replaces the room-wide policy. Only administrators may do this.
+    pub fn set_game_rights(&mut self, actor: Uuid, rights: GameRights) -> Result<(), RoomError> {
+        self.ensure_owner(actor)?;
+        self.rights = rights;
+        Ok(())
+    }
+
+    /// Overrides a single member's rights. Only administrators may do this and
+    /// the last administrator cannot demote themselves.
+    pub fn set_member_rights(
+        &mut self,
+        actor: Uuid,
+        target: Uuid,
+        rights: MemberRights,
+    ) -> Result<(), RoomError> {
+        self.ensure_owner(actor)?;
+        let target_is_admin = self.members.get(&target).is_some_and(MemberData::is_admin);
+        if target_is_admin && !rights.is_admin() && self.admin_count() <= 1 {
+            return Err(RoomError::CannotDemoteOwner);
+        }
+        let member = self
+            .members
+            .get_mut(&target)
+            .ok_or(RoomError::MemberNotFound)?;
+        member.rights = rights;
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         let size = self.game.board.size();
+        let automatic_distribution = self.game.automatic_distribution;
+        let explosion_mode = self.game.explosion_mode;
         let mut game = Game::new(Board::new_rect(size));
-        game.join(self.owner, TeamId::MIN)
-            .expect("a reset room must have space for its owner");
+        game.automatic_distribution = automatic_distribution;
+        game.explosion_mode = explosion_mode;
+
+        // Re-seat every member on their own team so the lobby stays consistent
+        // with the member list after the game is cleared.
+        let mut member_ids: Vec<_> = self.members.keys().copied().collect();
+        member_ids.sort_unstable();
+        for (index, member) in member_ids.into_iter().enumerate() {
+            let team_id = TeamId::new((index as u8).saturating_add(1)).unwrap_or(TeamId::MIN);
+            game.join(member, team_id)
+                .expect("a reset room must have space for every member");
+        }
+        for member in self.members.values_mut() {
+            member.status = Status::NotReady;
+        }
+
         self.game = game;
         self.bots.clear();
         self.has_started = false;
@@ -252,7 +532,14 @@ impl Room {
         }
         if !self.members.contains_key(&player) {
             self.game.join(player, team_id)?;
-            self.members.insert(player, Status::NotReady);
+            // The first member of an unowned room takes over as administrator.
+            let rights = if self.members.values().any(MemberData::is_admin) {
+                MemberRights::Custom(PlayerRights::default())
+            } else {
+                MemberRights::All
+            };
+            self.members
+                .insert(player, MemberData::new(Status::NotReady, rights));
         }
         Ok(())
     }
@@ -274,6 +561,7 @@ impl Room {
         self.persist_timeline(&game.timeline[first_new_event..])?;
 
         self.members.remove(&player);
+        self.promote_admin_if_needed();
         self.game = game;
         self.compact_teams();
         Ok(())
@@ -283,21 +571,15 @@ impl Room {
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
-        let status = self
+        let member = self
             .members
             .get_mut(&actor)
             .ok_or(RoomError::PermissionDenied)?;
-        *status = if ready {
+        member.status = if ready {
             Status::Ready
         } else {
             Status::NotReady
         };
-        Ok(())
-    }
-
-    pub fn set_allow_team_change(&mut self, actor: Uuid, allow: bool) -> Result<(), RoomError> {
-        self.ensure_owner(actor)?;
-        self.game.set_allow_team_change(allow);
         Ok(())
     }
 
@@ -311,13 +593,15 @@ impl Room {
             return Err(GameError::GameAlreadyStarted.into());
         }
 
-        let is_owner = actor == self.owner;
-        let is_self = self
+        let is_own = self
             .game
             .characters
             .get(&target_member)
             .is_some_and(|character| character.controller == MemberId::Player(actor));
-        if !is_owner && (!is_self || !self.game.allow_team_change) {
+        let may_change = self
+            .effective_rights(actor)
+            .is_some_and(|rights| rights.teams.allows(is_own));
+        if !may_change {
             return Err(RoomError::PermissionDenied);
         }
 
@@ -335,25 +619,29 @@ impl Room {
         team_id: TeamId,
         config: BotConfig,
     ) -> Result<CharacterId, RoomError> {
-        self.ensure_owner(actor)?;
+        self.ensure_characters(actor)?;
         let bot_id = self.game.add_bot(team_id)?;
         self.bots.insert(bot_id, config);
         Ok(bot_id)
     }
 
     pub fn kick_member(&mut self, actor: Uuid, member_id: CharacterId) -> Result<(), RoomError> {
-        self.ensure_owner(actor)?;
-        // In online rooms the owner's seat is the owner's only presence, so it
-        // cannot be removed. Offline hot-seat rooms may drop every human seat
-        // to watch bots play.
-        if matches!(self.mode, RoomMode::Online { .. })
-            && self
+        self.ensure_characters(actor)?;
+        // In online rooms a seat is its player's only presence, so an
+        // administrator's seat cannot be removed by another player. Offline
+        // hot-seat rooms may drop every human seat to watch bots play.
+        if matches!(self.mode, RoomMode::Online { .. }) {
+            let is_owner_seat = self
                 .game
                 .characters
                 .get(&member_id)
-                .is_some_and(|character| character.controller == MemberId::Player(self.owner))
-        {
-            return Err(RoomError::CannotKickOwner);
+                .is_some_and(|character| match character.controller {
+                    MemberId::Player(player) => self.is_admin(player),
+                    MemberId::Bot => false,
+                });
+            if is_owner_seat {
+                return Err(RoomError::CannotKickOwner);
+            }
         }
 
         let controller = self
@@ -370,8 +658,10 @@ impl Room {
                     .characters
                     .values()
                     .any(|character| character.controller == controller)
+                    && !self.is_admin(player)
                 {
                     self.members.remove(&player);
+                    self.promote_admin_if_needed();
                 }
             }
             MemberId::Bot => {
@@ -380,6 +670,28 @@ impl Room {
         }
         self.compact_teams();
         Ok(())
+    }
+
+    /// Keeps at least one administrator in a non-empty room, e.g. after the
+    /// owner leaves or is removed. The lowest member id is promoted so the
+    /// result is deterministic.
+    fn promote_admin_if_needed(&mut self) {
+        if self.members.is_empty() || self.members.values().any(MemberData::is_admin) {
+            return;
+        }
+        let Some(id) = self.members.keys().copied().min() else {
+            return;
+        };
+        if let Some(member) = self.members.get_mut(&id) {
+            member.rights = MemberRights::All;
+        }
+    }
+
+    fn admin_count(&self) -> usize {
+        self.members
+            .values()
+            .filter(|member| member.is_admin())
+            .count()
     }
 
     /// Уплотняет номера команд до 1..K. Только до старта: после старта
@@ -407,7 +719,23 @@ impl Room {
 
     pub fn start(&mut self, actor: Uuid, automatic_distribution: bool) -> Result<(), RoomError> {
         self.ensure_owner(actor)?;
-        if self.members.values().any(|status| *status != Status::Ready) {
+        // Only members who actually control a seat gate the start; an operator
+        // without seats (e.g. after kicking everyone in a hot-seat room) does
+        // not block the game from reporting the real problem.
+        let seated: BTreeSet<Uuid> = self
+            .game
+            .characters
+            .values()
+            .filter_map(|character| match character.controller {
+                MemberId::Player(player) => Some(player),
+                MemberId::Bot => None,
+            })
+            .collect();
+        if self
+            .members
+            .iter()
+            .any(|(id, member)| seated.contains(id) && member.status != Status::Ready)
+        {
             return Err(RoomError::MembersNotReady);
         }
         let mut game = self.game.clone();
@@ -499,11 +827,33 @@ impl Room {
         Ok(())
     }
 
+    /// Requires the actor to be an administrator (full rights).
     fn ensure_owner(&self, actor: Uuid) -> Result<(), RoomError> {
-        if actor == self.owner {
+        if self.is_admin(actor) {
             Ok(())
         } else {
             Err(RoomError::NotOwner)
+        }
+    }
+
+    fn resolved_rights(&self, actor: Uuid) -> Result<GameRights, RoomError> {
+        self.effective_rights(actor)
+            .ok_or(RoomError::PermissionDenied)
+    }
+
+    fn ensure_game_rule(&self, actor: Uuid) -> Result<(), RoomError> {
+        if self.resolved_rights(actor)?.game_rule {
+            Ok(())
+        } else {
+            Err(RoomError::PermissionDenied)
+        }
+    }
+
+    fn ensure_characters(&self, actor: Uuid) -> Result<(), RoomError> {
+        if self.resolved_rights(actor)?.characters {
+            Ok(())
+        } else {
+            Err(RoomError::PermissionDenied)
         }
     }
 }
@@ -592,6 +942,10 @@ mod tests {
         TeamId::new(id).unwrap()
     }
 
+    fn pos(slot: u8) -> BoardSize {
+        BoardSize::from_slot(slot)
+    }
+
     #[test]
     fn owner_can_open_close_and_players_can_join_only_when_open() {
         let owner = uid(10);
@@ -655,13 +1009,17 @@ mod tests {
             .map(|(&id, _)| id)
             .unwrap();
 
-        assert_eq!(room.add_bot(guest, tid(2)), Err(RoomError::NotOwner));
+        assert_eq!(
+            room.add_bot(guest, tid(2)),
+            Err(RoomError::PermissionDenied)
+        );
         assert_eq!(room.change_team(guest, guest_character, tid(3)), Ok(()));
         assert_eq!(
             room.apply_action(guest, owner_character, GameAction::Skip),
             Err(RoomError::PermissionDenied)
         );
-        room.set_allow_team_change(owner, false).unwrap();
+        room.set_game_rights(owner, GameRights::new(Rights::Nope, false, false))
+            .unwrap();
         assert_eq!(
             room.change_team(guest, guest_character, tid(4)),
             Err(RoomError::PermissionDenied)
@@ -683,9 +1041,186 @@ mod tests {
     }
 
     #[test]
+    fn rights_default_to_own_team_changes_for_members() {
+        let owner = uid(10);
+        let guest = uid(20);
+        let mut room = Room::new(
+            owner,
+            RoomMode::Online {
+                global: false,
+                open: true,
+            },
+        );
+        room.join(guest, tid(1)).unwrap();
+        let owner_character = room
+            .game()
+            .characters
+            .iter()
+            .find(|(_, character)| character.controller == MemberId::Player(owner))
+            .map(|(&id, _)| id)
+            .unwrap();
+        let guest_character = room
+            .game()
+            .characters
+            .iter()
+            .find(|(_, character)| character.controller == MemberId::Player(guest))
+            .map(|(&id, _)| id)
+            .unwrap();
+
+        assert!(room.is_admin(owner));
+        assert!(!room.is_admin(guest));
+        assert_eq!(room.rights(), GameRights::default());
+        assert_eq!(room.effective_rights(guest), Some(GameRights::default()));
+
+        // Guests may move their own seats but not someone else's.
+        assert_eq!(room.change_team(guest, guest_character, tid(3)), Ok(()));
+        assert_eq!(
+            room.change_team(guest, owner_character, tid(3)),
+            Err(RoomError::PermissionDenied)
+        );
+
+        // The roster and the rules stay in the administrator's hands.
+        assert_eq!(
+            room.add_bot(guest, tid(2)),
+            Err(RoomError::PermissionDenied)
+        );
+        assert_eq!(
+            room.set_board_size(guest, 5, 5),
+            Err(RoomError::PermissionDenied)
+        );
+        assert_eq!(
+            room.set_game_rights(guest, GameRights::new(Rights::All, true, true)),
+            Err(RoomError::NotOwner)
+        );
+    }
+
+    #[test]
+    fn member_overrides_extend_the_room_policy() {
+        let owner = uid(10);
+        let guest = uid(20);
+        let mut room = Room::new(
+            owner,
+            RoomMode::Online {
+                global: false,
+                open: true,
+            },
+        );
+        room.join(guest, tid(1)).unwrap();
+        let guest_character = room
+            .game()
+            .characters
+            .iter()
+            .find(|(_, character)| character.controller == MemberId::Player(guest))
+            .map(|(&id, _)| id)
+            .unwrap();
+
+        room.set_member_rights(
+            owner,
+            guest,
+            MemberRights::Custom(
+                PlayerRights::new()
+                    .with_teams(Rights::All)
+                    .with_characters(true)
+                    .with_game_rule(true),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            room.effective_rights(guest),
+            Some(GameRights::new(Rights::All, true, true))
+        );
+        assert_eq!(room.change_team(guest, guest_character, tid(2)), Ok(()));
+        assert!(room.add_bot(guest, tid(3)).is_ok());
+        assert_eq!(room.set_board_size(guest, 5, 5), Ok(()));
+    }
+
+    #[test]
+    fn global_rights_tighten_members_but_never_administrators() {
+        let owner = uid(10);
+        let guest = uid(20);
+        let mut room = Room::new(
+            owner,
+            RoomMode::Online {
+                global: false,
+                open: true,
+            },
+        );
+        room.join(guest, tid(1)).unwrap();
+        let guest_character = room
+            .game()
+            .characters
+            .iter()
+            .find(|(_, character)| character.controller == MemberId::Player(guest))
+            .map(|(&id, _)| id)
+            .unwrap();
+
+        room.set_game_rights(owner, GameRights::new(Rights::Nope, true, false))
+            .unwrap();
+
+        // The policy denies team changes but grants roster management.
+        assert_eq!(
+            room.change_team(guest, guest_character, tid(2)),
+            Err(RoomError::PermissionDenied)
+        );
+        assert!(room.add_bot(guest, tid(3)).is_ok());
+        assert_eq!(
+            room.set_board_size(guest, 5, 5),
+            Err(RoomError::PermissionDenied)
+        );
+
+        // Administrators ignore the room policy.
+        assert_eq!(room.change_team(owner, guest_character, tid(2)), Ok(()));
+    }
+
+    #[test]
+    fn the_last_administrator_is_preserved() {
+        let owner = uid(10);
+        let guest = uid(20);
+        let mut room = Room::new(
+            owner,
+            RoomMode::Online {
+                global: false,
+                open: true,
+            },
+        );
+        room.join(guest, tid(1)).unwrap();
+
+        assert_eq!(
+            room.set_member_rights(owner, owner, MemberRights::Custom(PlayerRights::default())),
+            Err(RoomError::CannotDemoteOwner)
+        );
+
+        // Once there are two administrators, one of them may step down.
+        room.set_member_rights(owner, guest, MemberRights::All)
+            .unwrap();
+        assert_eq!(room.admin_count(), 2);
+        room.set_member_rights(owner, owner, MemberRights::Custom(PlayerRights::default()))
+            .unwrap();
+        assert_eq!(room.owner(), Some(guest));
+    }
+
+    #[test]
+    fn leaving_promotes_the_next_member_to_administrator() {
+        let owner = uid(10);
+        let guest = uid(20);
+        let mut room = Room::new(
+            owner,
+            RoomMode::Online {
+                global: false,
+                open: true,
+            },
+        );
+        room.join(guest, tid(1)).unwrap();
+
+        room.leave(owner).unwrap();
+        assert_eq!(room.owner(), Some(guest));
+        assert!(room.is_admin(guest));
+    }
+
+    #[test]
     fn room_start_and_actions_are_persisted_for_replay() {
         use crate::api::game::storage::GameStore;
-        use glam::U8Vec2;
 
         let path =
             std::env::temp_dir().join(format!("forup-room-history-{}.redb", Uuid::generate()));
@@ -744,7 +1279,7 @@ mod tests {
         directory
             .get_mut(room_id)
             .unwrap()
-            .apply_action(owner, owner_character, GameAction::Increase(U8Vec2::ZERO))
+            .apply_action(owner, owner_character, GameAction::Increase(pos(0)))
             .unwrap();
         directory.get_mut(room_id).unwrap().end_game(owner).unwrap();
 
@@ -757,7 +1292,7 @@ mod tests {
             history.timeline[0],
             Timeline::Action {
                 member_id: owner_character,
-                action: GameAction::Increase(U8Vec2::ZERO),
+                action: GameAction::Increase(pos(0)),
             }
         );
         assert_eq!(history.timeline[1], Timeline::End);
@@ -800,12 +1335,16 @@ mod tests {
         room.add_local_member(uid(10)).unwrap();
         room.add_bot(uid(10), room.next_team_id()).unwrap();
         let lobby = room.view_state();
-        assert_eq!((lobby.width, lobby.height), (6, 5));
+        // Ширина и высота нормализуются: 6 × 5 и 5 × 6 — один размер.
+        assert_eq!((lobby.width, lobby.height), (5, 6));
         assert!(!lobby.automatic_distribution);
         assert_eq!(lobby.members.len(), 3);
         assert_eq!(lobby.teams.len(), 3);
         assert!(lobby.members.iter().any(|member| member.is_bot));
-        assert_eq!(room.set_board_size(uid(20), 6, 5), Err(RoomError::NotOwner));
+        assert_eq!(
+            room.set_board_size(uid(20), 6, 5),
+            Err(RoomError::PermissionDenied)
+        );
     }
 
     #[test]
@@ -939,7 +1478,6 @@ mod tests {
     #[test]
     fn save_game_and_past_games() {
         use crate::api::game::storage::GameStore;
-        use glam::U8Vec2;
 
         let path = std::env::temp_dir().join(format!("forup-room-save-{}.redb", Uuid::generate()));
         let store = GameStore::open(&path).unwrap();
@@ -979,7 +1517,7 @@ mod tests {
         directory
             .get_mut(room_id)
             .unwrap()
-            .apply_action(owner, player_id, GameAction::Increase(U8Vec2::ZERO))
+            .apply_action(owner, player_id, GameAction::Increase(pos(0)))
             .unwrap();
 
         // Save checkpoint

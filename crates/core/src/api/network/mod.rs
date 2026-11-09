@@ -3,11 +3,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod prelude {
-    pub use super::{Room, RoomDirectory, RoomError, RoomId, RoomMode, Status, Uuid, UuidExt};
+    pub use super::{
+        GameRights, MemberData, MemberRights, PlayerRights, Rights, Room, RoomDirectory, RoomError,
+        RoomId, RoomMode, Status, Uuid, UuidExt,
+    };
 }
 
 mod room;
-pub use room::{Room, RoomDirectory, RoomError, RoomId, RoomMode, Status};
+pub use room::{
+    GameRights, MemberData, MemberRights, PlayerRights, Rights, Room, RoomDirectory, RoomError,
+    RoomId, RoomMode, Status,
+};
 
 /// Ненулевой идентификатор: `Option<Uuid>` занимает столько же места, сколько `u32`.
 pub type Uuid = NonZeroU32;

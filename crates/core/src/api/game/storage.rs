@@ -471,9 +471,12 @@ fn compute_winner_team(game: &Game) -> Option<TeamId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::game::board::{CharacterId, GameAction, TeamId};
+    use crate::api::game::board::{BoardSize, CharacterId, GameAction, TeamId};
     use crate::api::network::{Uuid, UuidExt};
-    use glam::U8Vec2;
+
+    fn pos(slot: u8) -> BoardSize {
+        BoardSize::from_slot(slot)
+    }
 
     #[test]
     fn stores_a_start_snapshot_and_replayable_timeline() {
@@ -488,16 +491,13 @@ mod tests {
         game.start(false).unwrap();
 
         let game_id = store.start_game(42, &game).unwrap();
-        game.apply_action(member_id, GameAction::Increase(U8Vec2::ZERO))
+        game.apply_action(member_id, GameAction::Increase(pos(0)))
             .unwrap();
         store.append_timeline(game_id, &game.timeline).unwrap();
         let first_event_count = game.timeline.len();
 
-        game.apply_action(
-            CharacterId::new(2).unwrap(),
-            GameAction::Increase(U8Vec2::new(1, 0)),
-        )
-        .unwrap();
+        game.apply_action(CharacterId::new(2).unwrap(), GameAction::Increase(pos(1)))
+            .unwrap();
         store
             .append_timeline(game_id, &game.timeline[first_event_count..])
             .unwrap();
@@ -509,7 +509,7 @@ mod tests {
             history.timeline[0],
             Timeline::Action {
                 member_id,
-                action: GameAction::Increase(U8Vec2::ZERO),
+                action: GameAction::Increase(pos(0)),
             }
         );
 
@@ -544,13 +544,10 @@ mod tests {
         let checkpoint_id = store.save_checkpoint(42, &game).unwrap();
 
         // Make some moves
-        game.apply_action(member_id, GameAction::Increase(U8Vec2::ZERO))
+        game.apply_action(member_id, GameAction::Increase(pos(0)))
             .unwrap();
-        game.apply_action(
-            CharacterId::new(2).unwrap(),
-            GameAction::Increase(U8Vec2::new(1, 0)),
-        )
-        .unwrap();
+        game.apply_action(CharacterId::new(2).unwrap(), GameAction::Increase(pos(1)))
+            .unwrap();
 
         // Save another checkpoint after moves
         let checkpoint_id2 = store.save_checkpoint(42, &game).unwrap();

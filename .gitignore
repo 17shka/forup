@@ -1,3 +1,4 @@
 /target
 .trash/
 /crates/client/dist
+data/

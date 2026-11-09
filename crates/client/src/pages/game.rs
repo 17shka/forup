@@ -1,5 +1,4 @@
-use forup_core::api::game::board::prelude::GameError;
-use glam::U8Vec2;
+use forup_core::api::game::board::prelude::{BoardSize, GameError};
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use thaw::{
@@ -7,9 +6,21 @@ use thaw::{
     ToasterInjection,
 };
 
-use crate::components::{GameSettingsPanel, TeamsPanel};
+use crate::components::{GameSettingsPanel, RotateBoardButton, TeamsPanel};
 use crate::game::{Controller, GamePhase, GameSession, LocalGame, MoveMode};
 use crate::i18n::*;
+
+/// Maps a display grid coordinate back to the board slot after `turn`
+/// clockwise quarter-turns. The game state is untouched: only the rendering
+/// rotates.
+fn rotated_slot(turn: u8, x: u8, y: u8, width: u8, height: u8) -> u8 {
+    match turn % 4 {
+        1 => (height - 1 - x) * width + y,
+        2 => (height - 1 - y) * width + (width - 1 - x),
+        3 => x * width + (width - 1 - y),
+        _ => y * width + x,
+    }
+}
 
 /// Animation variant used when a cell grows or shrinks. Two equivalent names
 /// are alternated through [`LocalGame::animation_tick`] so repeated changes
@@ -23,7 +34,7 @@ fn cell_animation_class(tick: u64, growing: bool) -> &'static str {
     }
 }
 
-fn cell_class(state: &LocalGame, pos: U8Vec2) -> String {
+fn cell_class(state: &LocalGame, pos: BoardSize) -> String {
     let mut class = String::from("board-cell");
     if let Some(cell) = state.game.board.get(pos) {
         if cell.owner.is_some() {
@@ -46,7 +57,7 @@ fn cell_class(state: &LocalGame, pos: U8Vec2) -> String {
 
 /// The cell colour is the team hue; only its brightness changes with the
 /// value (5% per point, so `4` is 20% lighter and `-2` is 10% darker).
-fn cell_style(state: &LocalGame, pos: U8Vec2) -> String {
+fn cell_style(state: &LocalGame, pos: BoardSize) -> String {
     let Some(cell) = state.game.board.get(pos) else {
         return String::new();
     };
@@ -58,7 +69,7 @@ fn cell_style(state: &LocalGame, pos: U8Vec2) -> String {
     format!("--team-hue: {hue}; --cell-brightness: {brightness:.2};")
 }
 
-fn cell_value(state: &LocalGame, pos: U8Vec2) -> String {
+fn cell_value(state: &LocalGame, pos: BoardSize) -> String {
     state
         .game
         .board
@@ -205,13 +216,21 @@ pub fn GamePage() -> impl IntoView {
             <div class="board-wrapper">
                 {move || {
                     let size = board_size.get();
-                    let width = u16::from(size.x);
-                    let height = u16::from(size.y);
-                    let cell_count = usize::from(width) * usize::from(height);
+                    let rotation = session.rotation.get() % 4;
+                    let board_width = size.w();
+                    let board_height = size.h();
+                    let (cols, rows) = if rotation.is_multiple_of(2) {
+                        (board_width, board_height)
+                    } else {
+                        (board_height, board_width)
+                    };
+                    let cell_count = usize::from(cols) * usize::from(rows);
                     let cells = (0..cell_count)
                         .map(|index| {
-                            let index = u16::try_from(index).unwrap_or_default();
-                            let pos = U8Vec2::new((index % width) as u8, (index / width) as u8);
+                            let x = (index % usize::from(cols)) as u8;
+                            let y = (index / usize::from(cols)) as u8;
+                            let slot = rotated_slot(rotation, x, y, board_width, board_height);
+                            let pos = BoardSize::from_slot(slot);
                             let mode = session.mode;
 
                             let class = move || session.state.with(|game| cell_class(game, pos));
@@ -254,7 +273,7 @@ pub fn GamePage() -> impl IntoView {
                         <div
                             class="board"
                             style=format!(
-                                "--board-cols: {width}; --board-rows: {height}; aspect-ratio: {width} / {height};"
+                                "--board-cols: {cols}; --board-rows: {rows}; aspect-ratio: {cols} / {rows};"
                             )
                         >
                             {cells}
@@ -268,6 +287,13 @@ pub fn GamePage() -> impl IntoView {
                     <div class=banner_class>
                         <span class=turn_dot_class style=turn_dot_style></span>
                         <span class="turn-banner__text">{turn_text}</span>
+                        <Show
+                            when=move || {
+                                session.state.with(|game| game.phase == GamePhase::Playing)
+                            }
+                        >
+                            <RotateBoardButton/>
+                        </Show>
                     </div>
                     <Show
                         when=move || session.state.with(|game| game.phase == GamePhase::Playing)
@@ -346,5 +372,35 @@ pub fn GamePage() -> impl IntoView {
 
             <TeamsPanel/>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rotated_slot;
+
+    /// Original 3×2 board:
+    /// ```text
+    /// 0 1 2
+    /// 3 4 5
+    /// ```
+    #[test]
+    fn clockwise_rotation_maps_the_top_left_cell() {
+        // 90°: the display's top-left is the original bottom-left cell.
+        assert_eq!(rotated_slot(1, 0, 0, 3, 2), 3);
+        assert_eq!(rotated_slot(1, 1, 0, 3, 2), 0);
+        // 180°: the original bottom-right cell.
+        assert_eq!(rotated_slot(2, 0, 0, 3, 2), 5);
+        // 270°: the original top-right cell.
+        assert_eq!(rotated_slot(3, 0, 0, 3, 2), 2);
+    }
+
+    #[test]
+    fn four_quarter_turns_return_to_the_original_layout() {
+        for y in 0..2 {
+            for x in 0..3 {
+                assert_eq!(rotated_slot(4, x, y, 3, 2), rotated_slot(0, x, y, 3, 2));
+            }
+        }
     }
 }
