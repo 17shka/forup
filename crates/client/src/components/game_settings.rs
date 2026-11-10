@@ -83,9 +83,10 @@ pub fn GameSettingsPanel() -> impl IntoView {
         class
     };
 
-    let lossy_label = StoredValue::new(t_string!(i18n, lossy).to_string());
-    let lossless_label = StoredValue::new(t_string!(i18n, lossless).to_string());
-    let group_label = StoredValue::new(t_string!(i18n, explosion_mode).to_string());
+    let lossy_label = "Lossy";
+    let lossless_label = "Lossless";
+    let group_label = Memo::new(move |_| t_string!(i18n, explosion_mode).to_string());
+    let automatic_label = Memo::new(move |_| t_string!(i18n, automatic_distribution).to_string());
 
     view! {
         <Show when=move || session.state.with(|game| game.phase != GamePhase::Playing)>
@@ -103,48 +104,50 @@ pub fn GameSettingsPanel() -> impl IntoView {
                         show_stops=false
                     />
                     <span class="settings-row__value settings-row__size">{size_text}</span>
-                    <RotateBoardButton/>
                 </div>
 
                 <div class="settings-row settings-row--switch">
                     <Switch
                         checked=automatic
-                        label=t_string!(i18n, automatic_distribution).to_string()
+                        label=automatic_label
                     />
 
-                    <div
-                        class="explosion-toggle"
-                        role="group"
-                        aria-label=group_label.get_value()
-                    >
-                        <button
-                            type="button"
-                            class=lossy_class
-                            aria-pressed=move || (!lossless.get()).to_string()
-                            aria-label=lossy_label.get_value()
-                            title=lossy_label.get_value()
-                            on:click=move |_| lossless.set(false)
+                    <div class="settings-row__right">
+                        <div
+                            class="explosion-toggle"
+                            role="group"
+                            aria-label=group_label
                         >
-                            <span
-                                class="explosion-toggle__dot explosion-toggle__dot--lossy"
-                                aria-hidden="true"
-                            ></span>
-                            <span class="explosion-toggle__text">{lossy_label.get_value()}</span>
-                        </button>
-                        <button
-                            type="button"
-                            class=lossless_class
-                            aria-pressed=move || lossless.get().to_string()
-                            aria-label=lossless_label.get_value()
-                            title=lossless_label.get_value()
-                            on:click=move |_| lossless.set(true)
-                        >
-                            <span
-                                class="explosion-toggle__dot explosion-toggle__dot--lossless"
-                                aria-hidden="true"
-                            ></span>
-                            <span class="explosion-toggle__text">{lossless_label.get_value()}</span>
-                        </button>
+                            <button
+                                type="button"
+                                class=lossy_class
+                                aria-pressed=move || (!lossless.get()).to_string()
+                                aria-label=lossy_label
+                                title=lossy_label
+                                on:click=move |_| lossless.set(false)
+                            >
+                                <span
+                                    class="explosion-toggle__dot explosion-toggle__dot--lossy"
+                                    aria-hidden="true"
+                                ></span>
+                                <span class="explosion-toggle__text">{lossy_label}</span>
+                            </button>
+                            <button
+                                type="button"
+                                class=lossless_class
+                                aria-pressed=move || lossless.get().to_string()
+                                aria-label=lossless_label
+                                title=lossless_label
+                                on:click=move |_| lossless.set(true)
+                            >
+                                <span
+                                    class="explosion-toggle__dot explosion-toggle__dot--lossless"
+                                    aria-hidden="true"
+                                ></span>
+                                <span class="explosion-toggle__text">{lossless_label}</span>
+                            </button>
+                        </div>
+                        <RotateBoardButton/>
                     </div>
                 </div>
             </Card>
@@ -168,7 +171,7 @@ pub fn RotateBoardButton() -> impl IntoView {
             on_click=move |_| session.rotate_board()
         >
             <span class="rotate-board__icon" aria-hidden="true">"⟳"</span>
-            <span class="visually-hidden">{label}</span>
+            <span class="rotate-board__label">{label}</span>
         </Button>
     }
 }

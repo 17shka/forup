@@ -2,13 +2,26 @@
 use std::path::Path;
 
 #[cfg(feature = "ssr")]
+mod api;
+
+#[cfg(feature = "ssr")]
+use api::{ApiState, router as api_router};
+#[cfg(feature = "ssr")]
 use axum::Router;
+#[cfg(feature = "ssr")]
+use axum::http::{StatusCode, header};
+#[cfg(feature = "ssr")]
+use axum::response::Response;
+#[cfg(feature = "ssr")]
+use axum::routing::get;
+#[cfg(feature = "ssr")]
+use client::app::{App, shell};
+#[cfg(feature = "ssr")]
+use forup_core::api::auth::UserStore;
 #[cfg(feature = "ssr")]
 use forup_core::api::game::storage::GameStore;
 #[cfg(feature = "ssr")]
 use forup_core::api::network::{RoomDirectory, RoomMode, Uuid, UuidExt};
-#[cfg(feature = "ssr")]
-use client::app::{App, shell};
 #[cfg(feature = "ssr")]
 use leptos::prelude::*;
 #[cfg(feature = "ssr")]
@@ -27,6 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = data_dir.join("game_history.redb");
     let store = GameStore::open(&db_path)?;
     let mut directory = RoomDirectory::with_history_store(store);
+
+    let users_path = data_dir.join("users.redb");
+    let users = UserStore::open(&users_path)?;
+    let api = api_router(ApiState::new(users));
+
     let owner_id = Uuid::generate();
     let default_room_id = directory.create(
         owner_id,
@@ -37,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("[Server] Initialized storage at {db_path:?}");
+    println!("[Server] Initialized accounts at {users_path:?}");
     println!(
         "[Server] Created default online room (ID: {default_room_id}) owned by user {owner_id}"
     );
@@ -44,6 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let routes = generate_route_list(App);
 
     let app = Router::new()
+        .merge(api)
+        .route("/favicon.ico", get(favicon))
         .leptos_routes(&leptos_options, routes, {
             let leptos_options = leptos_options.clone();
             move || shell(leptos_options.clone())
@@ -56,6 +77,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())
+}
+
+#[cfg(feature = "ssr")]
+async fn favicon() -> Result<Response, StatusCode> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let favicon_path = manifest_dir.join("../client/favicon.ico");
+    let bytes = tokio::fs::read(&favicon_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "image/x-icon")
+        .body(bytes.into())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?)
 }
 
 #[cfg(not(feature = "ssr"))]

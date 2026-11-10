@@ -1109,13 +1109,42 @@ impl Game {
         scratch.clone_from(&self.board);
         let mut blasts = Vec::new();
 
+        let has_cells = self.board.owns_cells(team);
+
+        // When a team has no cells yet (e.g. automatic distribution is off),
+        // collect enemy positions so starting cells can be placed as far away
+        // from other captured cells as possible.
+        let enemy_positions: Vec<BoardSize> = if !has_cells {
+            self.board
+                .iter()
+                .filter(|(_, c)| c.owner.is_some_and(|o| o != team))
+                .map(|(pos, _)| pos)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         self.legal_cells(team)
             .into_iter()
             .map(|pos| {
                 scratch.clone_from(&self.board);
                 let steps = scratch.apply_move(pos, team, 1, &mut blasts, self.explosion_mode);
                 let chain = (steps.saturating_sub(1) as Score) * cfg.chain_bonus;
-                (pos, scratch.evaluate(team, cfg) + chain)
+                let mut score = scratch.evaluate(team, cfg) + chain;
+
+                // With no owned cells, every empty cell scores equally. Break the
+                // tie by distance: prefer starting positions far from any enemy
+                // cell so bots don't all clump in the same corner.
+                if !has_cells && !enemy_positions.is_empty() {
+                    let min_dist_sq = enemy_positions
+                        .iter()
+                        .map(|&enemy| self.board.distance_sq(pos, enemy))
+                        .min()
+                        .unwrap_or(Score::MAX);
+                    score += min_dist_sq;
+                }
+
+                (pos, score)
             })
             .collect()
     }

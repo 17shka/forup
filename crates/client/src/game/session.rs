@@ -8,7 +8,7 @@ use leptos::prelude::*;
 /// matches the hydrated one.
 const FIRST_OWNER: u32 = 1;
 /// Hue of the first team; the rest are distributed evenly around the wheel.
-const TEAM_HUE_OFFSET: u16 = 210;
+const TEAM_HUE_OFFSET: u16 = 0;
 
 pub type ParticipantId = u32;
 

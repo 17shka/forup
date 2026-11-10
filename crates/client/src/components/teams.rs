@@ -65,7 +65,7 @@ fn TeamCard(team: TeamView) -> impl IntoView {
                 <CardHeader>
                     <span class="team-id-chip">"#" {team_id}</span>
                     <span class="team-card__summary">
-                        {format!(
+                        {move || format!(
                             "{}: {cells} · {}: {mass}",
                             t_string!(i18n, cells),
                             t_string!(i18n, mass),
@@ -85,6 +85,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
     let participant_id = member.id;
 
     let editable = move || session.state.with(|game| game.phase != GamePhase::Playing);
+    let remove_title = Memo::new(move |_| t_string!(i18n, remove).to_string());
 
     // The selects are controlled by the game state: the read side always
     // reflects the participant, and the write side ignores the first
@@ -246,7 +247,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
                             session.dispatch(move |game| game.remove_participant(participant_id));
                         }
                     >
-                        <span title=t_string!(i18n, remove).to_string()>"✕"</span>
+                        <span title=remove_title>"✕"</span>
                     </Button>
                 </div>
             </Show>

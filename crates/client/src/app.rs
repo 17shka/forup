@@ -3,6 +3,7 @@ use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
 
+use crate::auth::AuthState;
 use crate::components::{BottomNav, ProfileDrawer, SettingsDrawer};
 use crate::game::GameSession;
 use crate::i18n::I18nContextProvider;
@@ -20,6 +21,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                     name="viewport"
                     content="width=device-width, initial-scale=1, viewport-fit=cover"
                 />
+                <link rel="icon" href="/favicon.ico"/>
                 <AutoReload options=options.clone()/>
                 <HydrationScripts options/>
                 <MetaTags/>
@@ -68,6 +70,7 @@ fn AppShell() -> impl IntoView {
     // The local game lives above the settings/profile panel: navigating or
     // opening a drawer never resets the match.
     GameSession::provide();
+    AuthState::provide();
 
     view! {
         <div class="app-shell">

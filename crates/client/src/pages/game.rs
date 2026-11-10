@@ -213,6 +213,14 @@ pub fn GamePage() -> impl IntoView {
 
     view! {
         <div class="page game-page">
+
+            <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
+                <div class=banner_class>
+                    <span class=turn_dot_class style=turn_dot_style></span>
+                    <span class="turn-banner__text">{turn_text}</span>
+                </div>
+            </Show>
+
             <div class="board-wrapper">
                 {move || {
                     let size = board_size.get();
@@ -284,17 +292,6 @@ pub fn GamePage() -> impl IntoView {
 
             <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
                 <div class="turn-controls">
-                    <div class=banner_class>
-                        <span class=turn_dot_class style=turn_dot_style></span>
-                        <span class="turn-banner__text">{turn_text}</span>
-                        <Show
-                            when=move || {
-                                session.state.with(|game| game.phase == GamePhase::Playing)
-                            }
-                        >
-                            <RotateBoardButton/>
-                        </Show>
-                    </div>
                     <Show
                         when=move || session.state.with(|game| game.phase == GamePhase::Playing)
                     >
@@ -318,6 +315,7 @@ pub fn GamePage() -> impl IntoView {
                                 <span class="mode-action__icon" aria-hidden="true">"＋"</span>
                                 <span>{t!(i18n, increase)}</span>
                             </Button>
+                            <RotateBoardButton/>
                         </div>
                     </Show>
                 </div>

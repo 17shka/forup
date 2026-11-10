@@ -16,7 +16,7 @@ pub const THEME_DARK: &str = "dark";
 /// discovered from `locales/*.yml` by `build.rs`.
 pub const LANGUAGE_SYSTEM: &str = "system";
 
-const LANGUAGE_STORAGE_KEY: &str = "forup-language";
+const LANGUAGE_STORAGE_KEY: &str = "language";
 
 #[derive(Clone, Copy)]
 pub struct Settings {
@@ -42,7 +42,11 @@ pub fn SettingsScope(children: Children) -> impl IntoView {
         set_mode,
         state,
         ..
-    } = use_color_mode_with_options(UseColorModeOptions::default().emit_auto(true));
+    } = use_color_mode_with_options(
+        UseColorModeOptions::default()
+            .emit_auto(true)
+            .storage_key("theme".to_string()),
+    );
 
     // Thaw needs a concrete theme: `auto` is resolved by leptos-use from the
     // system preference, so keep the Thaw theme in sync with the resolved state.
