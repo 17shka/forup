@@ -13,7 +13,7 @@
 //! 6 5 4
 //! ```
 
-use crate::api::game::board::BoardSize;
+use crate::api::game::board::BoardCode;
 
 pub mod prelude {
     pub use super::{
@@ -27,8 +27,8 @@ pub mod prelude {
 pub const MAX_DIRECTION_RADIUS_SQ: u8 = 2;
 
 /// Смещение `(dx, dy)` для кода направления.
-pub const fn direction_offset(direction: u8) -> (i8, i8) {
-    match direction {
+pub const fn direction_offset(direction: BoardCode) -> (i8, i8) {
+    match direction.slot() {
         1 => (0, -1),
         2 => (1, -1),
         3 => (1, 0),
@@ -43,17 +43,17 @@ pub const fn direction_offset(direction: u8) -> (i8, i8) {
 
 /// Код направления для смещения внутри диска `3 × 3`.
 /// Для смещений за пределами диска возвращает `0`.
-const fn direction_from_offset(dx: i8, dy: i8) -> u8 {
+const fn direction_from_offset(dx: i8, dy: i8) -> BoardCode {
     match (dx, dy) {
-        (0, -1) => 1,
-        (1, -1) => 2,
-        (1, 0) => 3,
-        (1, 1) => 4,
-        (0, 1) => 5,
-        (-1, 1) => 6,
-        (-1, 0) => 7,
-        (-1, -1) => 8,
-        _ => 0,
+        (0, -1) => BoardCode::from_slot(1),
+        (1, -1) => BoardCode::from_slot(2),
+        (1, 0) => BoardCode::from_slot(3),
+        (1, 1) => BoardCode::from_slot(4),
+        (0, 1) => BoardCode::from_slot(5),
+        (-1, 1) => BoardCode::from_slot(6),
+        (-1, 0) => BoardCode::from_slot(7),
+        (-1, -1) => BoardCode::from_slot(8),
+        _ => BoardCode::from_slot(0),
     }
 }
 
@@ -85,7 +85,7 @@ pub const fn const_sqrt_f32(x: f32) -> f32 {
 }
 
 /// Квадрат расстояния от клетки до центра: `x² + y²`.
-const fn dist_sq(direction: u8) -> u8 {
+const fn dist_sq(direction: BoardCode) -> u8 {
     let (x, y) = direction_offset(direction);
     (x * x + y * y) as u8
 }
@@ -120,14 +120,14 @@ pub const fn disk_cell_count(radius_sq: u8) -> usize {
 /// `N` должно равняться `disk_cell_count(radius_sq)`. Если `N` меньше,
 /// возникнет ошибка выхода за границы массива при вычислении константы.
 /// Если `N` больше, хвост массива останется нулевым.
-pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [u8; N] {
+pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [BoardCode; N] {
     assert!(
         radius_sq <= MAX_DIRECTION_RADIUS_SQ,
         "direction codes only describe the 3x3 neighbourhood"
     );
     let max_coord = floor_sqrt(radius_sq) as i8;
     let radius_sq = radius_sq as i8;
-    let mut cells = [0; N];
+    let mut cells = [BoardCode::from_slot(0); N];
     let mut index = 0;
     let mut y = -max_coord;
     while y <= max_coord {
@@ -150,10 +150,10 @@ pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [u8; N] {
 /// Промежуточные значения округляются до ближайшего целого, при равной дробной части
 /// округление идёт от нуля. Если все клетки совпадают с центром, все получают `min_value`.
 pub const fn interpolate_by_distance<const N: usize>(
-    points: [u8; N],
+    points: [BoardCode; N],
     min_value: i8,
     max_value: i8,
-) -> [(u8, i8); N] {
+) -> [(BoardCode, i8); N] {
     let mut max_dist_sq = 0;
     let mut i = 0;
     while i < N {
@@ -168,7 +168,7 @@ pub const fn interpolate_by_distance<const N: usize>(
     let min_f = min_value as f32;
     let max_f = max_value as f32;
 
-    let mut result = [(0, 0); N];
+    let mut result = [(BoardCode::from_slot(0), 0); N];
     let mut i = 0;
     while i < N {
         let point = points[i];
@@ -230,15 +230,15 @@ pub const MAX_CACHED_PLAYERS: u8 = 16;
 
 /// Предвычисленная таблица `[ordinal размера доски][players] -> max_radius_sq`.
 /// Индекс по игрокам — само число игроков (`0..=MAX_CACHED_PLAYERS`).
-const MAX_RADIUS_SQ_TABLE: [[u8; MAX_CACHED_PLAYERS as usize + 1]; BoardSize::SIZE_COUNT as usize] =
+const MAX_RADIUS_SQ_TABLE: [[u8; MAX_CACHED_PLAYERS as usize + 1]; BoardCode::SIZE_COUNT as usize] =
     build_max_radius_sq_table();
 
 const fn build_max_radius_sq_table()
--> [[u8; MAX_CACHED_PLAYERS as usize + 1]; BoardSize::SIZE_COUNT as usize] {
-    let mut table = [[0; MAX_CACHED_PLAYERS as usize + 1]; BoardSize::SIZE_COUNT as usize];
+-> [[u8; MAX_CACHED_PLAYERS as usize + 1]; BoardCode::SIZE_COUNT as usize] {
+    let mut table = [[0; MAX_CACHED_PLAYERS as usize + 1]; BoardCode::SIZE_COUNT as usize];
     let mut ordinal = 0;
-    while ordinal < BoardSize::SIZE_COUNT {
-        let (w, h) = match BoardSize::from_ordinal(ordinal) {
+    while ordinal < BoardCode::SIZE_COUNT {
+        let (w, h) = match BoardCode::from_ordinal(ordinal) {
             Some(size) => size.dimensions(),
             None => unreachable!(),
         };
@@ -247,7 +247,7 @@ const fn build_max_radius_sq_table()
         // заполняет ответы сразу для всех количеств игроков.
         let mut radius_sq: u8 = 0;
         loop {
-            let blasts = min_blasts(w, h, radius_sq);
+            let blasts = min_blasts(w.get(), h.get(), radius_sq);
             let mut players = 0;
             while players <= MAX_CACHED_PLAYERS {
                 if blasts >= players as u16 {
@@ -296,48 +296,52 @@ const fn compute_max_radius_sq(width: u8, height: u8, players: u8) -> u8 {
 /// Для `players <= MAX_CACHED_PLAYERS` значение берётся из предвычисленной таблицы.
 /// Возвращает 0, если `size` не является допустимым размером доски или игроков
 /// больше, чем клеток. Для 0 и 1 игрока подходит любой радиус — возвращается `u8::MAX`.
-pub const fn max_radius_sq_for_players(size: BoardSize, players: u8) -> u8 {
-    let Some(ordinal) = size.ordinal() else {
+pub const fn max_radius_sq_for_players(size: BoardCode, players: u8) -> u8 {
+    let ordinal = size.ordinal();
+    if ordinal >= BoardCode::SIZE_COUNT {
         return 0;
-    };
+    }
     if players <= MAX_CACHED_PLAYERS {
         return MAX_RADIUS_SQ_TABLE[ordinal as usize][players as usize];
     }
     let (w, h) = size.dimensions();
-    if players as u16 > w as u16 * h as u16 {
+    let cells = w.get() as u16 * h.get() as u16;
+    if players as u16 > cells {
         return 0;
     }
-    compute_max_radius_sq(w, h, players)
+    compute_max_radius_sq(w.get(), h.get(), players)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU8;
 
     /// Диск с квадратом радиуса 2: центр, 4 соседние по прямой и 4 диагональные клетки.
     const BOMB_CELL_COUNT: usize = disk_cell_count(2);
 
     /// Затухание для диска радиуса² = 2: от -3 в центре до -1 на диагонали.
-    const BOMB_FALLOFF: [(u8, i8); BOMB_CELL_COUNT] =
+    const BOMB_FALLOFF: [(BoardCode, i8); BOMB_CELL_COUNT] =
         interpolate_by_distance(disk_cells::<BOMB_CELL_COUNT>(2), -3, -1);
 
     const _: () = assert!(BOMB_CELL_COUNT == 9);
 
     #[test]
     fn falloff_center_has_min_value() {
-        assert_eq!(BOMB_FALLOFF[4], (0, -3));
+        assert_eq!(BOMB_FALLOFF[4], (BoardCode::from_slot(0), -3));
     }
 
     #[test]
     fn falloff_corner_has_max_value() {
-        assert_eq!(BOMB_FALLOFF[0], (8, -1));
+        assert_eq!(BOMB_FALLOFF[0], (BoardCode::from_slot(8), -1));
     }
 
     #[test]
     fn max_radius_sq_for_4_players_on_10x10() {
         // Радиус² 9: максимум 29 клеток, ceil(100 / 29) = 4 взрыва.
         // Радиус² 10: 37 клеток, хватит 3 взрывов.
-        let size = BoardSize::new(10, 10).unwrap();
+        let side = NonZeroU8::new(10).unwrap();
+        let size = BoardCode::from_size(side, side).unwrap();
         assert_eq!(max_radius_sq_for_players(size, 4), 9);
     }
 
@@ -377,14 +381,16 @@ mod tests {
 
     #[test]
     fn table_matches_direct_computation() {
-        for ordinal in 0..BoardSize::SIZE_COUNT {
-            let size = BoardSize::from_ordinal(ordinal).unwrap();
+        for ordinal in 0..BoardCode::SIZE_COUNT {
+            let size = BoardCode::from_ordinal(ordinal).unwrap();
             let (w, h) = size.dimensions();
             for players in 2..=MAX_CACHED_PLAYERS {
                 assert_eq!(
                     max_radius_sq_for_players(size, players),
-                    compute_max_radius_sq(w, h, players),
-                    "{w}x{h}, {players} players"
+                    compute_max_radius_sq(w.get(), h.get(), players),
+                    "{}x{}, {players} players",
+                    w.get(),
+                    h.get()
                 );
             }
         }

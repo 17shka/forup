@@ -1,4 +1,4 @@
-use forup_core::api::game::board::prelude::{BoardSize, GameError};
+use forup_core::api::game::board::prelude::{BoardCode, GameError};
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use thaw::{
@@ -34,7 +34,7 @@ fn cell_animation_class(tick: u64, growing: bool) -> &'static str {
     }
 }
 
-fn cell_class(state: &LocalGame, pos: BoardSize) -> String {
+fn cell_class(state: &LocalGame, pos: BoardCode) -> String {
     let mut class = String::from("board-cell");
     if let Some(cell) = state.game.board.get(pos) {
         if cell.owner.is_some() {
@@ -57,7 +57,7 @@ fn cell_class(state: &LocalGame, pos: BoardSize) -> String {
 
 /// The cell colour is the team hue; only its brightness changes with the
 /// value (5% per point, so `4` is 20% lighter and `-2` is 10% darker).
-fn cell_style(state: &LocalGame, pos: BoardSize) -> String {
+fn cell_style(state: &LocalGame, pos: BoardCode) -> String {
     let Some(cell) = state.game.board.get(pos) else {
         return String::new();
     };
@@ -69,7 +69,7 @@ fn cell_style(state: &LocalGame, pos: BoardSize) -> String {
     format!("--team-hue: {hue}; --cell-brightness: {brightness:.2};")
 }
 
-fn cell_value(state: &LocalGame, pos: BoardSize) -> String {
+fn cell_value(state: &LocalGame, pos: BoardCode) -> String {
     state
         .game
         .board
@@ -238,8 +238,8 @@ pub fn GamePage() -> impl IntoView {
                 {move || {
                     let size = board_size.get();
                     let rotation = session.rotation.get() % 4;
-                    let board_width = size.w();
-                    let board_height = size.h();
+                    let board_width = size.width().get();
+                    let board_height = size.height().get();
                     let (cols, rows) = if rotation.is_multiple_of(2) {
                         (board_width, board_height)
                     } else {
@@ -251,7 +251,7 @@ pub fn GamePage() -> impl IntoView {
                             let x = (index % usize::from(cols)) as u8;
                             let y = (index / usize::from(cols)) as u8;
                             let slot = rotated_slot(rotation, x, y, board_width, board_height);
-                            let pos = BoardSize::from_slot(slot);
+                            let pos = BoardCode::from_slot(slot);
                             let mode = session.mode;
 
                             let class = move || session.state.with(|game| cell_class(game, pos));

@@ -62,7 +62,7 @@ pub enum MoveMode {
 }
 
 impl MoveMode {
-    pub fn action(self, pos: BoardSize) -> GameAction {
+    pub fn action(self, pos: BoardCode) -> GameAction {
         match self {
             Self::Increase => GameAction::Increase(pos),
             Self::Decrease => GameAction::Decrease(pos),
@@ -400,12 +400,12 @@ impl LocalGame {
 
     // --- match settings ---------------------------------------------------
 
-    pub fn board_size(&self) -> BoardSize {
+    pub fn board_size(&self) -> BoardCode {
         self.game.board.size()
     }
 
     /// Resizes the board. Only allowed outside a running match.
-    pub fn set_board_size(&mut self, size: BoardSize) -> Result<(), GameError> {
+    pub fn set_board_size(&mut self, size: BoardCode) -> Result<(), GameError> {
         self.enter_edit_mode();
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted);
@@ -578,7 +578,7 @@ impl LocalGame {
     }
 
     /// A legal target for the current human seat's next action.
-    pub fn can_move_to(&self, pos: BoardSize) -> bool {
+    pub fn can_move_to(&self, pos: BoardCode) -> bool {
         if !self.is_human_turn() || !self.game.board.contains(pos) {
             return false;
         }
@@ -612,7 +612,7 @@ impl LocalGame {
         Ok(())
     }
 
-    pub fn make_move(&mut self, pos: BoardSize, mode: MoveMode) -> Result<(), GameError> {
+    pub fn make_move(&mut self, pos: BoardCode, mode: MoveMode) -> Result<(), GameError> {
         let character = self.require_human_turn()?;
         self.submit(character, mode.action(pos))
     }
@@ -786,7 +786,7 @@ impl LocalGame {
             .collect()
     }
 
-    pub fn change_at(&self, pos: BoardSize) -> i16 {
+    pub fn change_at(&self, pos: BoardCode) -> i16 {
         self.changes
             .get(usize::from(pos.slot()))
             .copied()
@@ -1004,6 +1004,7 @@ impl GameSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU8;
 
     fn started() -> LocalGame {
         let mut game = LocalGame::new();
@@ -1011,7 +1012,7 @@ mod tests {
         game
     }
 
-    fn current_human_cell(game: &LocalGame) -> BoardSize {
+    fn current_human_cell(game: &LocalGame) -> BoardCode {
         let team = game.current_team().expect("a human team owns the turn");
         game.game
             .board
@@ -1135,7 +1136,8 @@ mod tests {
     #[test]
     fn match_settings_are_applied_on_start() {
         let mut game = LocalGame::new();
-        let size = BoardSize::new(5, 7).unwrap();
+        let (w, h) = (NonZeroU8::new(5).unwrap(), NonZeroU8::new(7).unwrap());
+        let size = BoardCode::from_size(w, h).unwrap();
         game.set_board_size(size).unwrap();
         game.set_automatic_distribution(false);
 

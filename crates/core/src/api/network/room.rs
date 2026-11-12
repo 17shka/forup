@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU8;
 
 use crate::api::game::board::{
-    Board, BoardSize, BotConfig, CharacterId, ExplosionMode, Game, GameAction, GameError, MemberId,
+    Board, BoardCode, BotConfig, CharacterId, ExplosionMode, Game, GameAction, GameError, MemberId,
     TeamId, Timeline,
 };
 use crate::api::game::storage::{GameId, GameMetadata, GameStore, HistoryError};
@@ -401,7 +401,10 @@ impl Room {
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
-        let size = BoardSize::new(width, height).ok_or(RoomError::InvalidBoardSize)?;
+        let size = NonZeroU8::new(width)
+            .zip(NonZeroU8::new(height))
+            .and_then(|(w, h)| BoardCode::from_size(w, h))
+            .ok_or(RoomError::InvalidBoardSize)?;
         self.game.board.set_size(size);
         Ok(())
     }
@@ -476,7 +479,7 @@ impl Room {
         let explosion_mode = self.game.explosion_mode;
         let safe_radius = self.game.safe_radius();
         let automatic = self.automatic_distribution;
-        let mut game = Game::new(Board::new_rect(size));
+        let mut game = Game::new(Board::new(size));
         game.explosion_mode = explosion_mode;
 
         // Re-seat every member on their own team so the lobby stays consistent
@@ -954,8 +957,8 @@ mod tests {
         TeamId::new(id).unwrap()
     }
 
-    fn pos(slot: u8) -> BoardSize {
-        BoardSize::from_slot(slot)
+    fn pos(slot: u8) -> BoardCode {
+        BoardCode::from_slot(slot)
     }
 
     #[test]

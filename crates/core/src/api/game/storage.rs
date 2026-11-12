@@ -480,11 +480,11 @@ fn compute_winner_team(game: &Game) -> Option<TeamId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::game::board::{BoardSize, CharacterId, GameAction, TeamId};
+    use crate::api::game::board::{BoardCode, CharacterId, GameAction, TeamId};
     use crate::api::network::{Uuid, UuidExt};
 
-    fn pos(slot: u8) -> BoardSize {
-        BoardSize::from_slot(slot)
+    fn pos(slot: u8) -> BoardCode {
+        BoardCode::from_slot(slot)
     }
 
     #[test]

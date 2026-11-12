@@ -119,8 +119,8 @@ impl Room {
             .find_map(|(_, member)| (member.stats.wins > 0).then_some(member.team_id));
 
         GameViewState {
-            width: game.board.size().w(),
-            height: game.board.size().h(),
+            width: game.board.size().width().get(),
+            height: game.board.size().height().get(),
             cells: game.board.cells().clone(),
             legal_moves,
             members,

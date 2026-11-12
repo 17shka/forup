@@ -11,7 +11,7 @@ use crate::api::network::Uuid; // NonZeroU32
 
 pub mod prelude {
     pub use super::{
-        Board, BoardSize, BotConfig, CellAbility, CellData, CharacterData, CharacterId,
+        Board, BoardCode, BotConfig, CellAbility, CellData, CharacterData, CharacterId,
         ExplosionMode, Game, GameAction, GameError, GameSnapshot, MemberId, MemberStat, Score,
         TeamId, Timeline,
     };
@@ -22,124 +22,119 @@ pub type CharacterId = NonZeroU8;
 pub type TeamId = NonZeroU8;
 pub type Score = i32;
 
-/// Компактный идентификатор доски размером в один байт.
+/// Однобайтовый код для всего, что относится к клеточному полю. Одно и то же
+/// значение используется в трёх ролях:
 ///
-/// Одно и то же значение типа используется в двух ролях:
-/// * **размер доски** — строится через [`BoardSize::new`]; ширина и высота
+/// * **размер доски** — код строится через [`BoardCode::from_size`]; стороны
 ///   нормализуются так, что `w <= h`, поэтому `4 × 8` и `8 × 4` — один размер;
-/// * **клетка** — строится через [`BoardSize::from_slot`], где первая клетка
-///   кодируется как `BoardSize(0)`.
+/// * **клетка** — код строится через [`BoardCode::from_slot`] и равен слоту
+///   клетки, нумерация с нуля;
+/// * **направление** — слот в окрестности `3 × 3` вокруг клетки (см.
+///   [`crate::api::circle`]).
 ///
 /// В одном байте помещается 256 слотов клеток, поэтому максимальная доска —
-/// `16 × 16`.
+/// `16 × 16`. Кодов канонических размеров (пар сторон `3..=16` с `w <= h`)
+/// нужно всего 105, так что ограничивает именно количество клеток, а не
+/// кодировка размера.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoardSize(u8);
+pub struct BoardCode(u8);
 
-impl BoardSize {
-    pub const MIN_BOARD_SIZE: (u8, u8) = (3, 3);
-    /// Один байт даёт ровно 256 слотов клеток, поэтому максимальная доска —
-    /// `16 × 16`. Кодов размеров (канонических пар `3..=16`) нужно всего 105,
-    /// так что ограничивает именно количество клеток, а не кодировка размера.
-    pub const MAX_BOARD_SIZE: (u8, u8) = (16, 16);
-    pub const STANDARD_BOARD_SIZE: (u8, u8) = (8, 8);
+impl BoardCode {
+    /// Наименьшая сторона допустимой доски.
+    pub const MIN_SIDE: u8 = 3;
+    /// Наибольшая сторона допустимой доски: `16 × 16` занимает все 256 слотов.
+    pub const MAX_SIDE: u8 = 16;
 
     /// Минимальная доска `3 × 3`.
-    pub const MIN: Self = match Self::encode(3, 3) {
-        Some(id) => Self::from_id(id),
-        None => panic!("the minimum board size must be valid"),
-    };
+    pub const MIN_SIZE: Self = Self::size_code(Self::MIN_SIDE, Self::MIN_SIDE);
     /// Стандартная доска `8 × 8`.
-    pub const STANDARD: Self = match Self::encode(8, 8) {
-        Some(id) => Self::from_id(id),
-        None => panic!("the standard board size must be valid"),
-    };
-    /// Количество допустимых канонических размеров. Идентификаторы размеров
-    /// занимают диапазон `1..=SIZE_COUNT`.
-    pub const SIZE_COUNT: u8 = match Self::encode(Self::MAX_BOARD_SIZE.0, Self::MAX_BOARD_SIZE.1) {
-        Some(id) => id,
-        None => panic!("the maximum board size must be valid"),
-    };
+    pub const STANDARD_SIZE: Self = Self::size_code(8, 8);
+    /// Максимальная доска `16 × 16`, использует все 256 слотов клеток.
+    pub const MAX_SIZE: Self = Self::size_code(Self::MAX_SIDE, Self::MAX_SIDE);
+    /// Количество канонических размеров; коды размеров занимают `1..=SIZE_COUNT`.
+    pub const SIZE_COUNT: u8 = Self::MAX_SIZE.0;
 
-    /// Размер по его порядковому номеру в перечислении канонических размеров
-    /// (`0..SIZE_COUNT`). Порядок перечисления — по возрастанию высоты, затем ширины:
-    /// `3 × 3`, `3 × 4`, `4 × 4`, `3 × 5`, ...
-    pub const fn from_ordinal(ordinal: u8) -> Option<Self> {
-        if ordinal < Self::SIZE_COUNT {
-            Some(Self::from_id(ordinal + 1))
-        } else {
-            None
-        }
-    }
-
-    /// Порядковый номер размера в перечислении (`0..SIZE_COUNT`).
-    pub const fn ordinal(self) -> Option<u8> {
-        if self.0 >= 1 && self.0 <= Self::SIZE_COUNT {
-            Some(self.0 - 1)
-        } else {
-            None
-        }
-    }
-
-    const fn encode(w: u8, h: u8) -> Option<u8> {
-        let (w, h) = if w > h { (h, w) } else { (w, h) };
-        if w < Self::MIN_BOARD_SIZE.0
-            || h < Self::MIN_BOARD_SIZE.1
-            || w > Self::MAX_BOARD_SIZE.0
-            || h > Self::MAX_BOARD_SIZE.1
-        {
+    /// Код размера доски по его сторонам. `None`, если сторона меньше
+    /// [`MIN_SIDE`] или больше [`MAX_SIDE`].
+    pub const fn from_size(w: NonZeroU8, h: NonZeroU8) -> Option<Self> {
+        let (w, h) = (w.get(), h.get());
+        if w < Self::MIN_SIDE || h < Self::MIN_SIDE || w > Self::MAX_SIDE || h > Self::MAX_SIDE {
             return None;
         }
-        let prev_h = (h - Self::MIN_BOARD_SIZE.1) as u16;
-        let base_id = prev_h * (prev_h + 1) / 2;
-        let id = base_id + (w - Self::MIN_BOARD_SIZE.0 + 1) as u16;
-        Some(id as u8)
+        Some(Self::size_code(w, h))
     }
 
-    const fn from_id(id: u8) -> Self {
-        Self(id)
-    }
-
-    pub const fn new(w: u8, h: u8) -> Option<Self> {
-        match Self::encode(w, h) {
-            Some(id) => Some(Self::from_id(id)),
-            None => None,
+    /// Размер по его порядковому номеру в перечислении канонических размеров
+    /// (`0..SIZE_COUNT`). Порядок перечисления — по возрастанию высоты, затем
+    /// ширины: `3 × 3`, `3 × 4`, `4 × 4`, `3 × 5`, ...
+    pub const fn from_ordinal(ordinal: u8) -> Option<Self> {
+        if ordinal < Self::SIZE_COUNT {
+            Some(Self(ordinal + 1))
+        } else {
+            None
         }
     }
 
-    /// Идентификатор клетки по её слоту: первая клетка — `BoardSize(0)`.
+    /// Код клетки по её слоту: первая клетка — слот `0`.
     pub const fn from_slot(slot: u8) -> Self {
         Self(slot)
     }
 
-    /// Слот клетки (с нуля), обратный к [`BoardSize::from_slot`].
+    /// Порядковый номер размера в перечислении канонических размеров,
+    /// обратный к [`BoardCode::from_ordinal`]. Осмыслен только для кодов,
+    /// полученных через `from_size`/`from_ordinal`: слотовый код даёт значение
+    /// за пределами `0..SIZE_COUNT`.
+    pub const fn ordinal(self) -> u8 {
+        self.0.wrapping_sub(1)
+    }
+
+    /// Слот клетки, обратный к [`BoardCode::from_slot`].
     pub const fn slot(self) -> u8 {
         self.0
     }
 
-    pub const fn dimensions(self) -> (u8, u8) {
+    /// Стороны доски `(w, h)` с `w <= h`.
+    pub const fn dimensions(self) -> (NonZeroU8, NonZeroU8) {
         let id = self.0 as u16;
-        let min_size = Self::MIN_BOARD_SIZE.1 as u16;
-        let mut h = min_size;
+        let min_side = Self::MIN_SIDE as u16;
+        let mut h = min_side;
         loop {
-            let n = h - min_size;
+            let n = h - min_side;
             let max_id = (n + 1) * (n + 2) / 2;
             if id <= max_id {
-                let prev_max = n * (n + 1) / 2;
-                let w = id - prev_max + min_size - 1;
-                return (w as u8, h as u8);
+                let w = id - n * (n + 1) / 2 + min_side - 1;
+                // Для любого байта w >= 2, поэтому `unwrap` не срабатывает.
+                return (
+                    NonZeroU8::new(w as u8).unwrap(),
+                    NonZeroU8::new(h as u8).unwrap(),
+                );
             }
             h += 1;
         }
     }
-    pub const fn w(self) -> u8 {
+
+    /// Ширина доски, `w <= h`.
+    pub const fn width(self) -> NonZeroU8 {
         self.dimensions().0
     }
-    pub const fn h(self) -> u8 {
+
+    /// Высота доски, `h >= w`.
+    pub const fn height(self) -> NonZeroU8 {
         self.dimensions().1
     }
+
+    /// Количество клеток доски.
     pub const fn cell_count(self) -> usize {
         let (w, h) = self.dimensions();
-        w as usize * h as usize
+        w.get() as usize * h.get() as usize
+    }
+
+    /// Код канонического размера со сторонами `MIN_SIDE..=MAX_SIDE`.
+    const fn size_code(w: u8, h: u8) -> Self {
+        let (w, h) = if w > h { (h, w) } else { (w, h) };
+        let prev_h = (h - Self::MIN_SIDE) as u16;
+        let id = prev_h * (prev_h + 1) / 2 + (w - Self::MIN_SIDE + 1) as u16;
+        Self(id as u8)
     }
 }
 
@@ -213,56 +208,64 @@ mod id_set_tests {
 }
 
 #[cfg(test)]
-mod board_size_tests {
-    use super::BoardSize;
+mod board_code_tests {
+    use super::{BoardCode, NonZeroU8};
+
+    fn side(n: u8) -> NonZeroU8 {
+        NonZeroU8::new(n).unwrap()
+    }
+
+    fn size(w: u8, h: u8) -> Option<BoardCode> {
+        BoardCode::from_size(side(w), side(h))
+    }
+
+    #[test]
+    fn out_of_range_sides_are_rejected() {
+        assert_eq!(size(1, 3), None);
+        assert_eq!(size(3, 2), None);
+        assert_eq!(size(17, 17), None);
+    }
 
     #[test]
     fn orientation_is_normalized() {
-        assert_eq!(BoardSize::new(4, 8), BoardSize::new(8, 4));
+        assert_eq!(size(4, 8), size(8, 4));
     }
 
     #[test]
     fn cell_slots_are_zero_based() {
-        assert_eq!(BoardSize::from_slot(0).slot(), 0);
-        assert_eq!(BoardSize::from_slot(u8::MAX).slot(), u8::MAX);
+        assert_eq!(BoardCode::from_slot(0).slot(), 0);
+        assert_eq!(BoardCode::from_slot(u8::MAX).slot(), u8::MAX);
     }
 
     #[test]
     fn max_board_uses_every_cell_slot() {
-        let (w, h) = BoardSize::MAX_BOARD_SIZE;
-        let max = BoardSize::new(w, h).unwrap();
-        assert_eq!((max.w(), max.h()), (w, h));
+        let max = BoardCode::MAX_SIZE;
+        assert_eq!((max.width(), max.height()), (side(16), side(16)));
         assert_eq!(max.cell_count(), usize::from(u8::MAX) + 1);
-        assert_eq!(BoardSize::new(w + 1, h + 1), None);
+        assert_eq!(size(17, 17), None);
     }
 
     #[test]
     fn the_ordinal_enumerates_every_canonical_size() {
+        assert_eq!(BoardCode::MIN_SIZE.dimensions(), (side(3), side(3)));
         assert_eq!(
-            BoardSize::from_ordinal(0).unwrap().dimensions(),
-            BoardSize::MIN_BOARD_SIZE
-        );
-        assert_eq!(
-            BoardSize::from_ordinal(BoardSize::SIZE_COUNT - 1)
+            BoardCode::from_ordinal(BoardCode::SIZE_COUNT - 1)
                 .unwrap()
                 .dimensions(),
-            BoardSize::MAX_BOARD_SIZE
+            (side(16), side(16))
         );
-        assert_eq!(BoardSize::from_ordinal(BoardSize::SIZE_COUNT), None);
+        assert_eq!(BoardCode::from_ordinal(BoardCode::SIZE_COUNT), None);
 
-        let sizes: Vec<_> = (0..BoardSize::SIZE_COUNT)
-            .filter_map(BoardSize::from_ordinal)
+        let sizes: Vec<_> = (0..BoardCode::SIZE_COUNT)
+            .filter_map(BoardCode::from_ordinal)
             .map(|size| size.dimensions())
             .collect();
-        assert!(sizes.contains(&(3, 6)));
-        assert!(sizes.contains(&(4, 9)));
-        assert!(sizes.contains(&(5, 16)));
-        for (ordinal, size) in sizes.into_iter().enumerate() {
-            assert!(size.0 >= 3 && size.0 <= size.1 && size.1 <= 16);
-            assert_eq!(
-                BoardSize::new(size.0, size.1).unwrap().ordinal(),
-                Some(ordinal as u8)
-            );
+        assert!(sizes.contains(&(side(3), side(6))));
+        assert!(sizes.contains(&(side(4), side(9))));
+        assert!(sizes.contains(&(side(5), side(16))));
+        for (ordinal, (w, h)) in sizes.into_iter().enumerate() {
+            assert!(w.get() >= 3 && w.get() <= h.get() && h.get() <= 16);
+            assert_eq!(BoardCode::from_size(w, h).unwrap().ordinal(), ordinal as u8);
         }
     }
 }
@@ -283,12 +286,13 @@ mod game_rule_tests {
         Uuid::new(id).unwrap()
     }
 
-    fn size(w: u8, h: u8) -> BoardSize {
-        BoardSize::new(w, h).unwrap()
+    fn size(w: u8, h: u8) -> BoardCode {
+        let (w, h) = (NonZeroU8::new(w).unwrap(), NonZeroU8::new(h).unwrap());
+        BoardCode::from_size(w, h).unwrap()
     }
 
-    fn pos(slot: u8) -> BoardSize {
-        BoardSize::from_slot(slot)
+    fn pos(slot: u8) -> BoardCode {
+        BoardCode::from_slot(slot)
     }
 
     #[test]
@@ -303,7 +307,7 @@ mod game_rule_tests {
 
     #[test]
     fn compact_snapshot_reconstructs_initial_distribution_and_turn() {
-        let mut game = Game::new(Board::new_rect(size(6, 6)));
+        let mut game = Game::new(Board::new(size(6, 6)));
         game.add_local_member(uid(1), tid(1)).unwrap();
         game.add_local_member(uid(2), tid(2)).unwrap();
         game.start(true).unwrap();
@@ -328,7 +332,7 @@ mod game_rule_tests {
 
     #[test]
     fn safe_radius_is_clamped_to_the_table_maximum() {
-        let mut game = Game::new(Board::new_rect(size(10, 10)));
+        let mut game = Game::new(Board::new(size(10, 10)));
         game.add_local_member(uid(1), tid(1)).unwrap();
         game.add_local_member(uid(2), tid(2)).unwrap();
         game.add_local_member(uid(3), tid(3)).unwrap();
@@ -348,7 +352,7 @@ mod game_rule_tests {
 
     #[test]
     fn start_cells_keep_the_safe_radius() {
-        let mut game = Game::new(Board::new_rect(size(8, 8)));
+        let mut game = Game::new(Board::new(size(8, 8)));
         game.add_local_member(uid(1), tid(1)).unwrap();
         game.add_local_member(uid(2), tid(2)).unwrap();
         let safe_radius = game.set_safe_radius(8).unwrap();
@@ -371,7 +375,7 @@ mod game_rule_tests {
 
     #[test]
     fn starting_decrease_claims_the_cell_without_a_value() {
-        let mut game = Game::new(Board::new_rect(size(6, 6)));
+        let mut game = Game::new(Board::new(size(6, 6)));
         game.add_local_member(uid(1), tid(1)).unwrap();
         game.add_local_member(uid(2), tid(2)).unwrap();
         game.start(false).unwrap();
@@ -398,12 +402,12 @@ mod game_rule_tests {
     #[test]
     fn every_team_finds_a_start_cell_at_the_maximum_safe_radius() {
         for teams in 2..=crate::api::circle::MAX_CACHED_PLAYERS {
-            for ordinal in 0..BoardSize::SIZE_COUNT {
-                let board_size = BoardSize::from_ordinal(ordinal).unwrap();
+            for ordinal in 0..BoardCode::SIZE_COUNT {
+                let board_size = BoardCode::from_ordinal(ordinal).unwrap();
                 if board_size.cell_count() < usize::from(teams) {
                     continue;
                 }
-                let mut game = Game::new(Board::new_rect(board_size));
+                let mut game = Game::new(Board::new(board_size));
                 for team in 1..=teams {
                     game.add_bot(tid(team)).unwrap();
                 }
@@ -414,7 +418,7 @@ mod game_rule_tests {
                 for team in 1..=teams {
                     let pos = game
                         .board
-                        .ids()
+                        .positions()
                         .find(|&pos| game.is_safe_start_cell(pos, safe_radius))
                         .unwrap_or_else(|| {
                             panic!("{board_size:?} {teams} teams: no cell for team {team}")
@@ -429,7 +433,7 @@ mod game_rule_tests {
 
     #[test]
     fn elimination_status_is_kept_in_member_stats() {
-        let mut game = Game::new(Board::new_rect(size(3, 3)));
+        let mut game = Game::new(Board::new(size(3, 3)));
         game.add_local_member(uid(1), tid(1)).unwrap();
         game.add_local_member(uid(2), tid(2)).unwrap();
         game.add_local_member(uid(3), tid(3)).unwrap();
@@ -444,7 +448,7 @@ mod game_rule_tests {
 
     #[test]
     fn explosions_stop_as_soon_as_one_team_is_left() {
-        let mut game = Game::new(Board::new_rect(size(3, 3)));
+        let mut game = Game::new(Board::new(size(3, 3)));
         game.add_local_member(uid(1), tid(1)).unwrap();
         game.add_local_member(uid(2), tid(2)).unwrap();
         game.start(false).unwrap();
@@ -489,7 +493,7 @@ mod game_rule_tests {
 
     #[test]
     fn lossless_border_explosion_keeps_the_missing_shares() {
-        let mut board = Board::new_rect(size(3, 3));
+        let mut board = Board::new(size(3, 3));
         board[pos(0)] = CellData {
             value: 3,
             owner: Some(tid(1)),
@@ -509,7 +513,7 @@ mod game_rule_tests {
 
     #[test]
     fn lossy_border_explosion_dissipates_the_missing_shares() {
-        let mut board = Board::new_rect(size(3, 3));
+        let mut board = Board::new(size(3, 3));
         board[pos(0)] = CellData {
             value: 3,
             owner: Some(tid(1)),
@@ -596,8 +600,8 @@ impl Timeline {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameAction {
-    Increase(BoardSize),
-    Decrease(BoardSize),
+    Increase(BoardCode),
+    Decrease(BoardCode),
     Skip,
     Surrender,
 }
@@ -619,7 +623,7 @@ pub struct Game {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSnapshot {
     pub characters: Vec<(CharacterId, CharacterData)>,
-    pub board_size: BoardSize,
+    pub board_size: BoardCode,
     pub explosion_mode: ExplosionMode,
     #[serde(default)]
     pub safe_radius: u8,
@@ -631,7 +635,7 @@ pub struct GameSnapshot {
 
 impl GameSnapshot {
     pub fn restore(&self) -> Game {
-        let mut game = Game::new(Board::new_rect(self.board_size));
+        let mut game = Game::new(Board::new(self.board_size));
         game.characters = self.characters.iter().copied().collect();
         game.characters.sort_keys();
         game.current_turn = Some(0);
@@ -716,7 +720,7 @@ impl Game {
     }
 
     /// Свободная клетка дальше `safe_radius` от всех занятых клеток.
-    fn is_safe_start_cell(&self, pos: BoardSize, safe_radius: Score) -> bool {
+    fn is_safe_start_cell(&self, pos: BoardCode, safe_radius: Score) -> bool {
         self.board[pos].owner.is_none()
             && self.board.iter().all(|(other, cell)| {
                 cell.owner.is_none() || self.board.distance_sq(pos, other) > safe_radius
@@ -725,7 +729,7 @@ impl Game {
 
     /// Можно ли выбрать `pos` стартовой клеткой. Если из-за безопасного радиуса
     /// не осталось ни одной подходящей клетки, разрешается любая свободная.
-    pub fn can_start_at(&self, pos: BoardSize) -> bool {
+    pub fn can_start_at(&self, pos: BoardCode) -> bool {
         if !self.board.contains(pos) || self.board[pos].owner.is_some() {
             return false;
         }
@@ -733,16 +737,16 @@ impl Game {
         self.is_safe_start_cell(pos, safe_radius)
             || !self
                 .board
-                .ids()
+                .positions()
                 .any(|other| self.is_safe_start_cell(other, safe_radius))
     }
 
     /// Все клетки, которые сейчас можно выбрать стартовыми.
-    fn start_cells(&self) -> Vec<BoardSize> {
+    fn start_cells(&self) -> Vec<BoardCode> {
         let safe_radius = Score::from(self.safe_radius());
         let spaced: Vec<_> = self
             .board
-            .ids()
+            .positions()
             .filter(|&pos| self.is_safe_start_cell(pos, safe_radius))
             .collect();
         if !spaced.is_empty() {
@@ -891,11 +895,11 @@ impl Game {
             teams.insert(m.team_id.get());
         }
 
-        let mut placed: Vec<BoardSize> = Vec::with_capacity(teams.len());
+        let mut placed: Vec<BoardCode> = Vec::with_capacity(teams.len());
         for team in teams.iter() {
-            let mut best: Option<(Score, BoardSize)> = None;
+            let mut best: Option<(Score, BoardCode)> = None;
 
-            for pos in self.board.ids() {
+            for pos in self.board.positions() {
                 if placed.contains(&pos) {
                     continue;
                 }
@@ -1006,7 +1010,7 @@ impl Game {
     pub fn make_move(
         &mut self,
         member_id: CharacterId,
-        pos: BoardSize,
+        pos: BoardCode,
         increase: bool,
     ) -> Result<(), GameError> {
         self.make_move_with_result(member_id, pos, increase, &mut |_| {})
@@ -1016,7 +1020,7 @@ impl Game {
     fn make_move_with_result(
         &mut self,
         member_id: CharacterId,
-        pos: BoardSize,
+        pos: BoardCode,
         increase: bool,
         on_step: &mut dyn FnMut(&Board),
     ) -> Result<Option<TeamId>, GameError> {
@@ -1271,7 +1275,7 @@ impl Game {
         }
     }
 
-    pub fn move_weights(&self, member_id: CharacterId, cfg: &BotConfig) -> Vec<(BoardSize, Score)> {
+    pub fn move_weights(&self, member_id: CharacterId, cfg: &BotConfig) -> Vec<(BoardCode, Score)> {
         let Ok(team) = self.check_turn(member_id) else {
             return Vec::new();
         };
@@ -1285,7 +1289,7 @@ impl Game {
         // When a team has no cells yet (e.g. automatic distribution is off),
         // collect enemy positions so starting cells can be placed as far away
         // from other captured cells as possible.
-        let enemy_positions: Vec<BoardSize> = if !has_cells {
+        let enemy_positions: Vec<BoardCode> = if !has_cells {
             self.board
                 .iter()
                 .filter(|(_, c)| c.owner.is_some_and(|o| o != team))
@@ -1324,7 +1328,7 @@ impl Game {
         cfg.pick_best_action(&self.move_weights(member_id, cfg))
     }
 
-    fn legal_cells(&self, team: TeamId) -> Vec<BoardSize> {
+    fn legal_cells(&self, team: TeamId) -> Vec<BoardCode> {
         if !self.board.owns_cells(team) {
             return self.start_cells();
         }
@@ -1354,7 +1358,7 @@ impl BotConfig {
         chain_bonus: 2,
     };
 
-    pub fn pick_best_action(&self, weights: &[(BoardSize, Score)]) -> GameAction {
+    pub fn pick_best_action(&self, weights: &[(BoardCode, Score)]) -> GameAction {
         weights
             .iter()
             .max_by_key(|&&(pos, score)| (score, Reverse(pos.slot())))
@@ -1365,12 +1369,12 @@ impl BotConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Board {
     cells: Vec<CellData>,
-    size: BoardSize,
+    size: BoardCode,
 }
 
 impl Default for Board {
     fn default() -> Self {
-        let size = BoardSize::MIN;
+        let size = BoardCode::MIN_SIZE;
         Self {
             cells: vec![CellData::default(); size.cell_count()],
             size,
@@ -1378,19 +1382,19 @@ impl Default for Board {
     }
 }
 
-impl Index<BoardSize> for Board {
+impl Index<BoardCode> for Board {
     type Output = CellData;
 
     #[inline]
-    fn index(&self, pos: BoardSize) -> &CellData {
+    fn index(&self, pos: BoardCode) -> &CellData {
         debug_assert!(self.contains(pos));
         &self.cells[usize::from(pos.slot())]
     }
 }
 
-impl IndexMut<BoardSize> for Board {
+impl IndexMut<BoardCode> for Board {
     #[inline]
-    fn index_mut(&mut self, pos: BoardSize) -> &mut CellData {
+    fn index_mut(&mut self, pos: BoardCode) -> &mut CellData {
         debug_assert!(self.contains(pos));
         &mut self.cells[usize::from(pos.slot())]
     }
@@ -1398,27 +1402,26 @@ impl IndexMut<BoardSize> for Board {
 
 impl Board {
     pub fn standard() -> Self {
-        Self::new_rect(BoardSize::STANDARD)
+        Self::new(BoardCode::STANDARD_SIZE)
     }
 
-    pub fn new_rect(size: BoardSize) -> Self {
+    pub fn new(size: BoardCode) -> Self {
         let mut board = Self::default();
         board.set_size(size);
         board
     }
 
-    pub fn set_size(&mut self, size: BoardSize) {
-        // Re-validate through the dimension code: a deserialized value may not
-        // describe a playable board, because the same byte type also encodes
-        // cell slots.
+    pub fn set_size(&mut self, size: BoardCode) {
+        // Код из снимка может оказаться слотом клетки, а не размером доски:
+        // прогоняем его через from_size, чтобы получить валидный размер.
         let (w, h) = size.dimensions();
-        let size = BoardSize::new(w, h).unwrap_or(BoardSize::MIN);
+        let size = BoardCode::from_size(w, h).unwrap_or(BoardCode::MIN_SIZE);
         self.size = size;
         self.cells.resize(size.cell_count(), CellData::default());
         self.clear_cells();
     }
 
-    pub fn size(&self) -> BoardSize {
+    pub fn size(&self) -> BoardCode {
         self.size
     }
 
@@ -1426,7 +1429,7 @@ impl Board {
         &self.cells
     }
 
-    pub fn get(&self, pos: BoardSize) -> Option<&CellData> {
+    pub fn get(&self, pos: BoardCode) -> Option<&CellData> {
         if self.contains(pos) {
             Some(&self.cells[usize::from(pos.slot())])
         } else {
@@ -1434,40 +1437,36 @@ impl Board {
         }
     }
 
-    pub fn contains(&self, pos: BoardSize) -> bool {
+    pub fn contains(&self, pos: BoardCode) -> bool {
         usize::from(pos.slot()) < self.cells.len()
     }
 
-    /// Идентификатор клетки по её координатам.
-    pub fn position(&self, x: u8, y: u8) -> Option<BoardSize> {
-        if usize::from(x) >= usize::from(self.size.w())
-            || usize::from(y) >= usize::from(self.size.h())
-        {
+    pub fn position(&self, x: u8, y: u8) -> Option<BoardCode> {
+        if x >= self.size.width().get() || y >= self.size.height().get() {
             return None;
         }
-        let slot = u16::from(y) * u16::from(self.size.w()) + u16::from(x);
-        Some(BoardSize::from_slot(slot as u8))
+        let slot = u16::from(y) * u16::from(self.size.width().get()) + u16::from(x);
+        Some(BoardCode::from_slot(slot as u8))
     }
 
-    /// Координаты клетки.
-    pub fn coordinates(&self, pos: BoardSize) -> Option<(u8, u8)> {
+    pub fn coordinates(&self, pos: BoardCode) -> Option<(u8, u8)> {
         self.contains(pos)
             .then(|| self.xy_from_slot(usize::from(pos.slot())))
     }
 
     #[inline]
     fn xy_from_slot(&self, slot: usize) -> (u8, u8) {
-        let w = usize::from(self.size.w());
+        let w = usize::from(self.size.width().get());
         ((slot % w) as u8, (slot / w) as u8)
     }
 
     #[inline]
-    fn pos_from_slot(slot: usize) -> BoardSize {
+    fn pos_from_slot(slot: usize) -> BoardCode {
         debug_assert!(slot <= usize::from(u8::MAX));
-        BoardSize::from_slot(slot as u8)
+        BoardCode::from_slot(slot as u8)
     }
 
-    fn distance_sq(&self, a: BoardSize, b: BoardSize) -> Score {
+    fn distance_sq(&self, a: BoardCode, b: BoardCode) -> Score {
         let (ax, ay) = self.xy_from_slot(usize::from(a.slot()));
         let (bx, by) = self.xy_from_slot(usize::from(b.slot()));
         let dx = Score::from(ax) - Score::from(bx);
@@ -1475,15 +1474,15 @@ impl Board {
         dx * dx + dy * dy
     }
 
-    pub fn ids(&self) -> impl Iterator<Item = BoardSize> + '_ {
-        (0..self.cells.len()).map(|slot| BoardSize::from_slot(slot as u8))
+    pub fn positions(&self) -> impl Iterator<Item = BoardCode> + '_ {
+        (0..self.cells.len()).map(|slot| BoardCode::from_slot(slot as u8))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (BoardSize, CellData)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (BoardCode, CellData)> + '_ {
         self.cells
             .iter()
             .enumerate()
-            .map(|(slot, &cell)| (BoardSize::from_slot(slot as u8), cell))
+            .map(|(slot, &cell)| (BoardCode::from_slot(slot as u8), cell))
     }
 
     pub fn owns_cells(&self, team: TeamId) -> bool {
@@ -1516,7 +1515,7 @@ impl Board {
 
     fn apply_move(
         &mut self,
-        pos: BoardSize,
+        pos: BoardCode,
         team: TeamId,
         delta: i8,
         blasts: &mut Vec<Blast>,
@@ -1527,7 +1526,7 @@ impl Board {
 
     fn apply_move_until<F>(
         &mut self,
-        pos: BoardSize,
+        pos: BoardCode,
         team: TeamId,
         delta: i8,
         blasts: &mut Vec<Blast>,
@@ -1613,7 +1612,7 @@ impl Board {
         total
     }
 
-    fn is_threatened(&self, pos: BoardSize, cell: CellData, team: TeamId) -> bool {
+    fn is_threatened(&self, pos: BoardCode, cell: CellData, team: TeamId) -> bool {
         cell.ability.targets().iter().any(|&(direction, _)| {
             self.neighbor(pos, direction).is_some_and(|n| {
                 let other = self[n];
@@ -1622,12 +1621,16 @@ impl Board {
         })
     }
 
-    fn neighbor(&self, pos: BoardSize, direction: u8) -> Option<BoardSize> {
+    fn neighbor(&self, pos: BoardCode, direction: BoardCode) -> Option<BoardCode> {
         let (x, y) = self.xy_from_slot(usize::from(pos.slot()));
         let (dx, dy) = direction_offset(direction);
         let nx = i16::from(x) + i16::from(dx);
         let ny = i16::from(y) + i16::from(dy);
-        if nx < 0 || ny < 0 || nx >= i16::from(self.size.w()) || ny >= i16::from(self.size.h()) {
+        if nx < 0
+            || ny < 0
+            || nx >= i16::from(self.size.width().get())
+            || ny >= i16::from(self.size.height().get())
+        {
             None
         } else {
             self.position(nx as u8, ny as u8)
@@ -1636,15 +1639,15 @@ impl Board {
 }
 
 struct Blast {
-    pos: BoardSize,
+    pos: BoardCode,
     owner: Option<TeamId>,
-    targets: &'static [(u8, i8)],
+    targets: &'static [(BoardCode, i8)],
     share: i8,
     remainder: i8,
 }
 
 impl Blast {
-    fn new(board: &Board, pos: BoardSize, cell: CellData, mode: ExplosionMode) -> Self {
+    fn new(board: &Board, pos: BoardCode, cell: CellData, mode: ExplosionMode) -> Self {
         let targets = cell.ability.targets();
         let output_slots = targets.iter().filter(|&&(_, damage)| damage == 0).count() as i8;
 
@@ -1758,7 +1761,7 @@ impl CellAbility {
         self.targets().len() as i8
     }
 
-    pub fn targets(&self) -> &'static [(u8, i8)] {
+    pub fn targets(self) -> &'static [(BoardCode, i8)] {
         match self {
             CellAbility::None => &NORMAL_TARGETS,
             CellAbility::Bomb => &BOMB_TARGETS,
@@ -1773,10 +1776,17 @@ impl CellAbility {
     }
 }
 
-/// A regular cell explodes into its four cardinal neighbours only. The centre
-/// is not a target: including it would both raise the explosion threshold and
-/// feed the mass back into the exploding cell.
-const NORMAL_TARGETS: [(u8, i8); 4] = [(3, 0), (7, 0), (5, 0), (1, 0)];
+/// Обычная клетка взрывается только в четыре боковых соседа. Центр не входит
+/// в цели: иначе вырос бы порог взрыва и масса возвращалась бы во взорвавшуюся
+/// клетку. Направления — коды из [`crate::api::circle`], пары `(код, урон)`:
+/// `0` — обычная доля массы, отрицательное значение — урон способности.
+const NORMAL_TARGETS: [(BoardCode, i8); 4] = [
+    (BoardCode::from_slot(3), 0),
+    (BoardCode::from_slot(7), 0),
+    (BoardCode::from_slot(5), 0),
+    (BoardCode::from_slot(1), 0),
+];
 
-const BOMB_N: usize = disk_cell_count(2);
-const BOMB_TARGETS: [(u8, i8); BOMB_N] = interpolate_by_distance(disk_cells::<BOMB_N>(2), -3, -1);
+const BOMB_CELL_COUNT: usize = disk_cell_count(2);
+const BOMB_TARGETS: [(BoardCode, i8); BOMB_CELL_COUNT] =
+    interpolate_by_distance(disk_cells::<BOMB_CELL_COUNT>(2), -3, -1);

@@ -1,4 +1,4 @@
-use forup_core::api::game::board::prelude::BoardSize;
+use forup_core::api::game::board::prelude::BoardCode;
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, ButtonSize, Card, CardHeader, Slider, Switch};
 
@@ -14,7 +14,7 @@ pub fn GameSettingsPanel() -> impl IntoView {
     let session = GameSession::expect();
 
     let board_size = session.state.with_untracked(|game| game.board_size());
-    let size = RwSignal::new(f64::from(board_size.ordinal().unwrap_or(0)));
+    let size = RwSignal::new(f64::from(board_size.ordinal()));
     let automatic = RwSignal::new(
         session
             .state
@@ -34,8 +34,8 @@ pub fn GameSettingsPanel() -> impl IntoView {
         if previous.is_some_and(|previous| (previous - current).abs() > f64::EPSILON) {
             let ordinal = current
                 .round()
-                .clamp(0.0, f64::from(BoardSize::SIZE_COUNT - 1)) as u8;
-            if let Some(board_size) = BoardSize::from_ordinal(ordinal) {
+                .clamp(0.0, f64::from(BoardCode::SIZE_COUNT - 1)) as u8;
+            if let Some(board_size) = BoardCode::from_ordinal(ordinal) {
                 session.dispatch(move |game| game.set_board_size(board_size));
             }
         }
@@ -83,7 +83,7 @@ pub fn GameSettingsPanel() -> impl IntoView {
     let size_text = move || {
         session.state.with(|game| {
             let size = game.board_size();
-            format!("{}/{}", size.w(), size.h())
+            format!("{}/{}", size.width(), size.height())
         })
     };
 
@@ -126,7 +126,7 @@ pub fn GameSettingsPanel() -> impl IntoView {
                         class="settings-slider"
                         value=size
                         min=0.0
-                        max=f64::from(BoardSize::SIZE_COUNT - 1)
+                        max=f64::from(BoardCode::SIZE_COUNT - 1)
                         step=1.0
                         show_stops=false
                     />
