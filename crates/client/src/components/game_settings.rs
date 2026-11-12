@@ -25,6 +25,9 @@ pub fn GameSettingsPanel() -> impl IntoView {
             .state
             .with_untracked(|game| game.lossless_explosions()),
     );
+    let spacing = RwSignal::new(f64::from(
+        session.state.with_untracked(|game| game.safe_radius()),
+    ));
 
     Effect::new(move |previous: Option<f64>| {
         let current = size.get();
@@ -46,6 +49,22 @@ pub fn GameSettingsPanel() -> impl IntoView {
                 game.set_automatic_distribution(current);
                 Ok(())
             });
+        }
+        current
+    });
+
+    let spacing_max = move || f64::from(session.state.with(|game| game.max_safe_radius()));
+
+    Effect::new(move |previous: Option<f64>| {
+        let current = spacing.get();
+        if previous.is_some_and(|previous| (previous - current).abs() > f64::EPSILON) {
+            let max = spacing_max();
+            let value = current.round().clamp(0.0, max) as u8;
+            session.dispatch(move |game| game.set_safe_radius(value));
+            // The engine clamps to the board/teams limit, follow it.
+            spacing.set(f64::from(
+                session.state.with_untracked(|game| game.safe_radius()),
+            ));
         }
         current
     });
@@ -87,6 +106,14 @@ pub fn GameSettingsPanel() -> impl IntoView {
     let lossless_label = "Lossless";
     let group_label = Memo::new(move |_| t_string!(i18n, explosion_mode).to_string());
     let automatic_label = Memo::new(move |_| t_string!(i18n, automatic_distribution).to_string());
+    let spacing_label = Memo::new(move |_| t_string!(i18n, safe_radius).to_string());
+    let spacing_text = move || {
+        format!(
+            "{}/{}",
+            session.state.with(|game| game.safe_radius()),
+            spacing_max()
+        )
+    };
 
     view! {
         <Show when=move || session.state.with(|game| game.phase != GamePhase::Playing)>
@@ -105,6 +132,21 @@ pub fn GameSettingsPanel() -> impl IntoView {
                     />
                     <span class="settings-row__value settings-row__size">{size_text}</span>
                 </div>
+
+                <Show when=move || !automatic.get()>
+                    <div class="settings-row">
+                        <span class="settings-row__label">{spacing_label}</span>
+                        <Slider
+                            class="settings-slider"
+                            value=spacing
+                            min=0.0
+                            max=spacing_max
+                            step=1.0
+                            show_stops=false
+                        />
+                        <span class="settings-row__value">{spacing_text}</span>
+                    </div>
+                </Show>
 
                 <div class="settings-row settings-row--switch">
                     <Switch

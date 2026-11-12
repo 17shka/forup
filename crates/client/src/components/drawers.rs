@@ -3,12 +3,15 @@ use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use thaw::{
     Button, ButtonAppearance, DrawerBody, DrawerHeader, DrawerHeaderTitle, DrawerHeaderTitleAction,
-    DrawerPosition, DrawerSize, OverlayDrawer, Select, SelectSize,
+    DrawerPosition, DrawerSize, OverlayDrawer, Select, SelectSize, Slider,
 };
 
 use crate::auth::AuthState;
 use crate::i18n::*;
-use crate::settings::{LANGUAGE_SYSTEM, Settings, THEME_AUTO, THEME_DARK, THEME_LIGHT};
+use crate::settings::{
+    EXPLOSION_DELAY_MAX, EXPLOSION_DELAY_MIN, EXPLOSION_DELAY_STEP, LANGUAGE_SYSTEM, Settings,
+    THEME_AUTO, THEME_DARK, THEME_LIGHT,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthMode {
@@ -395,6 +398,15 @@ pub fn SettingsDrawer(open: RwSignal<bool>) -> impl IntoView {
     let ctx = Settings::expect();
     let theme_value = ctx.theme_choice;
     let language_value = (ctx.language, ctx.set_language);
+    let explosion_delay_value = (ctx.explosion_delay, ctx.set_explosion_delay);
+    let explosion_delay_text = move || {
+        t_string!(
+            i18n,
+            seconds_value,
+            value = format!("{:.2}", ctx.explosion_delay.get())
+        )
+        .to_string()
+    };
 
     view! {
         <OverlayDrawer
@@ -452,6 +464,23 @@ pub fn SettingsDrawer(open: RwSignal<bool>) -> impl IntoView {
                             </option>
                             {available_languages(ctx.language)}
                         </Select>
+                    </div>
+
+                    <div class="settings-field">
+                        <span class="settings-field__label">
+                            {t!(i18n, explosion_speed)}
+                        </span>
+                        <div class="settings-slider">
+                            <Slider
+                                class="settings-slider__input"
+                                value=explosion_delay_value
+                                min=EXPLOSION_DELAY_MIN
+                                max=EXPLOSION_DELAY_MAX
+                                step=EXPLOSION_DELAY_STEP
+                                show_stops=false
+                            />
+                            <span class="settings-slider__value">{explosion_delay_text}</span>
+                        </div>
                     </div>
                 </section>
             </DrawerBody>

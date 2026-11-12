@@ -106,7 +106,14 @@ impl GameHistory {
 
 fn apply_event(game: &mut Game, event: &Timeline) -> Result<(), GameError> {
     match *event {
-        Timeline::Action { member_id, action } => game.apply_action(member_id, action).map(|_| ()),
+        Timeline::Action(action) => {
+            let member_id = game
+                .current_turn
+                .and_then(|idx| game.characters.get_index(idx))
+                .map(|(id, _)| *id)
+                .ok_or(GameError::GameNotStarted)?;
+            game.apply_action(member_id, action).map(|_| ())
+        }
         Timeline::End => game.end_game(),
     }
 }
@@ -120,7 +127,12 @@ impl GameStore {
         })
     }
 
-    pub fn start_game(&self, room_id: u32, game: &Game) -> Result<GameId, HistoryError> {
+    pub fn start_game(
+        &self,
+        room_id: u32,
+        game: &Game,
+        automatic_distribution: bool,
+    ) -> Result<GameId, HistoryError> {
         if !game.is_started() {
             return Err(HistoryError::GameNotStarted);
         }
@@ -130,7 +142,7 @@ impl GameStore {
 
         let serialized_game = encode(&StoredGame {
             room_id,
-            snapshot: game.snapshot(),
+            snapshot: game.snapshot(automatic_distribution),
         })?;
 
         let saved_at = SystemTime::now()
@@ -460,12 +472,9 @@ fn timeline_sequence(key: &[u8]) -> Result<u64, HistoryError> {
 }
 
 fn compute_winner_team(game: &Game) -> Option<TeamId> {
-    game.characters.iter().find_map(|(&id, member)| {
-        game.stats
-            .get(&id)
-            .is_some_and(|stats| stats.wins > 0)
-            .then_some(member.team_id)
-    })
+    game.characters
+        .iter()
+        .find_map(|(_, member)| (member.stats.wins > 0).then_some(member.team_id))
 }
 
 #[cfg(test)]
@@ -490,7 +499,7 @@ mod tests {
             .unwrap();
         game.start(false).unwrap();
 
-        let game_id = store.start_game(42, &game).unwrap();
+        let game_id = store.start_game(42, &game, false).unwrap();
         game.apply_action(member_id, GameAction::Increase(pos(0)))
             .unwrap();
         store.append_timeline(game_id, &game.timeline).unwrap();
@@ -507,10 +516,7 @@ mod tests {
         assert_eq!(history.timeline.len(), 2);
         assert_eq!(
             history.timeline[0],
-            Timeline::Action {
-                member_id,
-                action: GameAction::Increase(pos(0)),
-            }
+            Timeline::Action(GameAction::Increase(pos(0))),
         );
 
         let replayed = history.replay().unwrap();
@@ -592,7 +598,7 @@ mod tests {
             .unwrap();
         game.start(false).unwrap();
 
-        let game_id = store.start_game(42, &game).unwrap();
+        let game_id = store.start_game(42, &game, false).unwrap();
 
         let games = store.list_games(42).unwrap();
         assert_eq!(games.len(), 1);

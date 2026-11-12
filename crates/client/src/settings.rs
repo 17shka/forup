@@ -17,6 +17,14 @@ pub const THEME_DARK: &str = "dark";
 pub const LANGUAGE_SYSTEM: &str = "system";
 
 const LANGUAGE_STORAGE_KEY: &str = "language";
+const EXPLOSION_DELAY_STORAGE_KEY: &str = "explosion_delay";
+
+/// Bounds of the pause between explosion waves, in seconds. `0` disables the
+/// step-by-step replay.
+pub const EXPLOSION_DELAY_MIN: f64 = 0.0;
+pub const EXPLOSION_DELAY_MAX: f64 = 0.5;
+pub const EXPLOSION_DELAY_STEP: f64 = 0.05;
+const EXPLOSION_DELAY_DEFAULT: f64 = 0.15;
 
 #[derive(Clone, Copy)]
 pub struct Settings {
@@ -25,6 +33,9 @@ pub struct Settings {
     /// Selected language mode (`system` or a locale code).
     pub language: Signal<String>,
     pub set_language: WriteSignal<String>,
+    /// Pause between explosion waves, in seconds.
+    pub explosion_delay: Signal<f64>,
+    pub set_explosion_delay: WriteSignal<f64>,
 }
 
 impl Settings {
@@ -83,6 +94,21 @@ pub fn SettingsScope(children: Children) -> impl IntoView {
         UseStorageOptions::default().initial_value(LANGUAGE_SYSTEM.to_string()),
     );
 
+    let (explosion_delay, set_explosion_delay, _) =
+        use_storage_with_options::<f64, FromToStringCodec>(
+            StorageType::Local,
+            EXPLOSION_DELAY_STORAGE_KEY.to_string(),
+            UseStorageOptions::default().initial_value(EXPLOSION_DELAY_DEFAULT),
+        );
+    let explosion_delay = Signal::derive(move || {
+        let delay = explosion_delay.get();
+        if delay.is_finite() {
+            delay.clamp(EXPLOSION_DELAY_MIN, EXPLOSION_DELAY_MAX)
+        } else {
+            EXPLOSION_DELAY_DEFAULT
+        }
+    });
+
     let system_locales = use_locales();
     let i18n = use_i18n();
 
@@ -102,6 +128,8 @@ pub fn SettingsScope(children: Children) -> impl IntoView {
         theme_choice,
         language,
         set_language,
+        explosion_delay,
+        set_explosion_delay,
     });
 
     view! {

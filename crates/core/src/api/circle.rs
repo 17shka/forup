@@ -13,9 +13,11 @@
 //! 6 5 4
 //! ```
 
+use crate::api::game::board::BoardSize;
+
 pub mod prelude {
     pub use super::{
-        direction_offset, disk_cell_count, disk_cells, interpolate_by_distance,
+        MAX_CACHED_PLAYERS, direction_offset, disk_cell_count, disk_cells, interpolate_by_distance,
         max_radius_sq_for_players,
     };
 }
@@ -56,13 +58,13 @@ const fn direction_from_offset(dx: i8, dy: i8) -> u8 {
 }
 
 /// Целая часть квадратного корня из `n`, то есть `floor(sqrt(n))`.
-/// Для `n < 1` возвращает 0.
-pub const fn floor_sqrt(n: i32) -> i32 {
-    let mut root = 0;
+pub const fn floor_sqrt(n: u8) -> u8 {
+    let n = n as u16;
+    let mut root: u16 = 0;
     while (root + 1) * (root + 1) <= n {
         root += 1;
     }
-    root
+    root as u8
 }
 
 /// Квадратный корень из `f32`, пригодный для `const` контекста.
@@ -83,18 +85,16 @@ pub const fn const_sqrt_f32(x: f32) -> f32 {
 }
 
 /// Квадрат расстояния от клетки до центра: `x² + y²`.
-const fn dist_sq(direction: u8) -> i32 {
+const fn dist_sq(direction: u8) -> u8 {
     let (x, y) = direction_offset(direction);
-    let x = x as i32;
-    let y = y as i32;
-    x * x + y * y
+    (x * x + y * y) as u8
 }
 
 /// Количество целых точек `(x, y)`, для которых `x² + y² <= radius_sq`,
 /// то есть размер диска клеток с центром в начале координат.
 pub const fn disk_cell_count(radius_sq: u8) -> usize {
-    let radius_sq = radius_sq as i32;
-    let max_coord = floor_sqrt(radius_sq);
+    let radius_sq = radius_sq as i16;
+    let max_coord = floor_sqrt(radius_sq as u8) as i16;
     let mut count = 0;
     let mut y = -max_coord;
     while y <= max_coord {
@@ -125,8 +125,8 @@ pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [u8; N] {
         radius_sq <= MAX_DIRECTION_RADIUS_SQ,
         "direction codes only describe the 3x3 neighbourhood"
     );
-    let radius_sq = radius_sq as i32;
-    let max_coord = floor_sqrt(radius_sq);
+    let max_coord = floor_sqrt(radius_sq) as i8;
+    let radius_sq = radius_sq as i8;
     let mut cells = [0; N];
     let mut index = 0;
     let mut y = -max_coord;
@@ -134,7 +134,7 @@ pub const fn disk_cells<const N: usize>(radius_sq: u8) -> [u8; N] {
         let mut x = -max_coord;
         while x <= max_coord {
             if x * x + y * y <= radius_sq {
-                cells[index] = direction_from_offset(x as i8, y as i8);
+                cells[index] = direction_from_offset(x, y);
                 index += 1;
             }
             x += 1;
@@ -190,70 +190,92 @@ pub const fn interpolate_by_distance<const N: usize>(
     result
 }
 
-/// Количество клеток поля `WIDTH × HEIGHT`, которые попадают во взрыв с квадратом радиуса
-/// `radius_sq` и центром в клетке `(center_x, center_y)`. Клетки за границами поля не учитываются.
-const fn blast_cell_count<const WIDTH: usize, const HEIGHT: usize>(
-    center_x: i32,
-    center_y: i32,
-    radius_sq: i32,
-) -> usize {
-    let max_offset = floor_sqrt(radius_sq);
-    let mut count = 0;
+/// Наибольшее число клеток поля `width × height`, которое может накрыть один взрыв
+/// с квадратом радиуса `radius_sq`.
+///
+/// Пересечение строки диска с доской максимально, когда центр ближе всего к середине,
+/// и каждая строка диска в отдельности максимальна при центральной клетке, поэтому
+/// достаточно посчитать взрыв в центральной клетке, а не перебирать все клетки поля.
+/// Результат — `u16`, так как доска `16 × 16` содержит 256 клеток.
+const fn max_blast_cell_count(width: u8, height: u8, radius_sq: u8) -> u16 {
+    let (w, h) = (width as i16, height as i16);
+    let (cx, cy) = (w / 2, h / 2);
+    let radius_sq = radius_sq as i16;
+    let max_offset = floor_sqrt(radius_sq as u8) as i16;
+    let mut count: u16 = 0;
     let mut dy = -max_offset;
     while dy <= max_offset {
-        let mut dx = -max_offset;
-        while dx <= max_offset {
-            let x = center_x + dx;
-            let y = center_y + dy;
-            let inside_field = x >= 0 && y >= 0 && x < WIDTH as i32 && y < HEIGHT as i32;
-            if dx * dx + dy * dy <= radius_sq && inside_field {
-                count += 1;
-            }
-            dx += 1;
+        let y = cy + dy;
+        if y >= 0 && y < h {
+            let half = floor_sqrt((radius_sq - dy * dy) as u8) as i16;
+            let left = if cx - half < 0 { 0 } else { cx - half };
+            let right = if cx + half >= w { w - 1 } else { cx + half };
+            count += (right - left + 1) as u16;
         }
         dy += 1;
     }
     count
 }
 
-/// Наибольшее число клеток, которое может накрыть один взрыв с квадратом радиуса `radius_sq`,
-/// если перебрать все клетки поля как центр.
-const fn max_blast_cell_count<const WIDTH: usize, const HEIGHT: usize>(radius_sq: i32) -> usize {
-    let mut max_count = 0;
-    let mut y = 0;
-    while y < HEIGHT {
-        let mut x = 0;
-        while x < WIDTH {
-            let count = blast_cell_count::<WIDTH, HEIGHT>(x as i32, y as i32, radius_sq);
-            if count > max_count {
-                max_count = count;
-            }
-            x += 1;
-        }
-        y += 1;
-    }
-    max_count
+/// Наименьшее число взрывов с квадратом радиуса `radius_sq`, необходимое для
+/// покрытия поля `width × height`: `ceil(total_cells / max_blast_cell_count)`.
+const fn min_blasts(width: u8, height: u8, radius_sq: u8) -> u16 {
+    let total_cells = width as u16 * height as u16;
+    total_cells.div_ceil(max_blast_cell_count(width, height, radius_sq))
 }
 
-/// Наибольший квадрат радиуса взрыва (радиус = `sqrt(result)`), при котором поле
-/// `WIDTH × HEIGHT` всё ещё требует не менее `players` взрывов для покрытия.
-///
-/// Оценка снизу: один взрыв накрывает не более `max_blast_cell_count` клеток, поэтому
-/// для покрытия всех `total_cells` клеток нужно не меньше `ceil(total_cells / max_cells)` взрывов.
-/// Возвращает 0, если поле пустое или игроков больше, чем клеток.
-pub const fn max_radius_sq_for_players<const WIDTH: usize, const HEIGHT: usize>(
-    players: usize,
-) -> u8 {
-    let total_cells = WIDTH * HEIGHT;
-    if total_cells == 0 || players > total_cells {
-        return 0;
+/// Максимальное число игроков, для которого результат
+/// [`max_radius_sq_for_players`] берётся из таблицы [`MAX_RADIUS_SQ_TABLE`].
+pub const MAX_CACHED_PLAYERS: u8 = 16;
+
+/// Предвычисленная таблица `[ordinal размера доски][players] -> max_radius_sq`.
+/// Индекс по игрокам — само число игроков (`0..=MAX_CACHED_PLAYERS`).
+const MAX_RADIUS_SQ_TABLE: [[u8; MAX_CACHED_PLAYERS as usize + 1]; BoardSize::SIZE_COUNT as usize] =
+    build_max_radius_sq_table();
+
+const fn build_max_radius_sq_table()
+-> [[u8; MAX_CACHED_PLAYERS as usize + 1]; BoardSize::SIZE_COUNT as usize] {
+    let mut table = [[0; MAX_CACHED_PLAYERS as usize + 1]; BoardSize::SIZE_COUNT as usize];
+    let mut ordinal = 0;
+    while ordinal < BoardSize::SIZE_COUNT {
+        let (w, h) = match BoardSize::from_ordinal(ordinal) {
+            Some(size) => size.dimensions(),
+            None => unreachable!(),
+        };
+        let row = &mut table[ordinal as usize];
+        // `min_blasts` не возрастает с ростом радиуса, поэтому один проход по радиусам
+        // заполняет ответы сразу для всех количеств игроков.
+        let mut radius_sq: u8 = 0;
+        loop {
+            let blasts = min_blasts(w, h, radius_sq);
+            let mut players = 0;
+            while players <= MAX_CACHED_PLAYERS {
+                if blasts >= players as u16 {
+                    row[players as usize] = radius_sq;
+                }
+                players += 1;
+            }
+            // Один взрыв накрывает всё поле: дальше значения уже не изменятся
+            // ни для кого, кроме `players <= 1`, которым подходит любой радиус.
+            if blasts <= 1 || radius_sq == u8::MAX {
+                break;
+            }
+            radius_sq += 1;
+        }
+        // Для 0 и 1 игрока подходит любой радиус.
+        row[0] = u8::MAX;
+        row[1] = u8::MAX;
+        ordinal += 1;
     }
+    table
+}
+
+/// Вычисление без таблицы, для количества игроков больше [`MAX_CACHED_PLAYERS`].
+const fn compute_max_radius_sq(width: u8, height: u8, players: u8) -> u8 {
     let mut best_radius_sq = 0;
     let mut radius_sq: u8 = 0;
     loop {
-        let max_cells = max_blast_cell_count::<WIDTH, HEIGHT>(radius_sq as i32);
-        let min_blasts = total_cells.div_ceil(max_cells);
-        if min_blasts < players {
+        if min_blasts(width, height, radius_sq) < players as u16 {
             break;
         }
         best_radius_sq = radius_sq;
@@ -263,6 +285,29 @@ pub const fn max_radius_sq_for_players<const WIDTH: usize, const HEIGHT: usize>(
         radius_sq += 1;
     }
     best_radius_sq
+}
+
+/// Наибольший квадрат радиуса взрыва (радиус = `sqrt(result)`), при котором поле
+/// `size` всё ещё требует не менее `players` взрывов для покрытия.
+///
+/// Оценка снизу: один взрыв накрывает не более `max_blast_cell_count` клеток, поэтому
+/// для покрытия всех клеток нужно не меньше `ceil(total_cells / max_cells)` взрывов.
+///
+/// Для `players <= MAX_CACHED_PLAYERS` значение берётся из предвычисленной таблицы.
+/// Возвращает 0, если `size` не является допустимым размером доски или игроков
+/// больше, чем клеток. Для 0 и 1 игрока подходит любой радиус — возвращается `u8::MAX`.
+pub const fn max_radius_sq_for_players(size: BoardSize, players: u8) -> u8 {
+    let Some(ordinal) = size.ordinal() else {
+        return 0;
+    };
+    if players <= MAX_CACHED_PLAYERS {
+        return MAX_RADIUS_SQ_TABLE[ordinal as usize][players as usize];
+    }
+    let (w, h) = size.dimensions();
+    if players as u16 > w as u16 * h as u16 {
+        return 0;
+    }
+    compute_max_radius_sq(w, h, players)
 }
 
 #[cfg(test)]
@@ -292,6 +337,56 @@ mod tests {
     fn max_radius_sq_for_4_players_on_10x10() {
         // Радиус² 9: максимум 29 клеток, ceil(100 / 29) = 4 взрыва.
         // Радиус² 10: 37 клеток, хватит 3 взрывов.
-        assert_eq!(max_radius_sq_for_players::<10, 10>(4), 9);
+        let size = BoardSize::new(10, 10).unwrap();
+        assert_eq!(max_radius_sq_for_players(size, 4), 9);
+    }
+
+    /// Полный перебор центров взрыва — эталон для [`max_blast_cell_count`].
+    fn brute_force_max_blast(w: u8, h: u8, radius_sq: u8) -> u16 {
+        let (w, h, r) = (i32::from(w), i32::from(h), i32::from(radius_sq));
+        let mut best = 0;
+        for cy in 0..h {
+            for cx in 0..w {
+                let mut count = 0;
+                for y in 0..h {
+                    for x in 0..w {
+                        let (dx, dy) = (x - cx, y - cy);
+                        if dx * dx + dy * dy <= r {
+                            count += 1;
+                        }
+                    }
+                }
+                best = best.max(count);
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn central_blast_is_the_largest() {
+        for (w, h) in [(3, 3), (3, 4), (5, 8), (8, 8), (7, 16), (16, 16)] {
+            for radius_sq in 0..=60 {
+                assert_eq!(
+                    max_blast_cell_count(w, h, radius_sq),
+                    brute_force_max_blast(w, h, radius_sq),
+                    "{w}x{h}, radius_sq {radius_sq}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_matches_direct_computation() {
+        for ordinal in 0..BoardSize::SIZE_COUNT {
+            let size = BoardSize::from_ordinal(ordinal).unwrap();
+            let (w, h) = size.dimensions();
+            for players in 2..=MAX_CACHED_PLAYERS {
+                assert_eq!(
+                    max_radius_sq_for_players(size, players),
+                    compute_max_radius_sq(w, h, players),
+                    "{w}x{h}, {players} players"
+                );
+            }
+        }
     }
 }

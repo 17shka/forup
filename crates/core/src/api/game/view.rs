@@ -40,7 +40,6 @@ pub struct GameViewState {
     pub can_skip: bool,
     pub is_started: bool,
     pub is_game_over: bool,
-    pub automatic_distribution: bool,
     pub winner_team: Option<TeamId>,
 }
 
@@ -51,7 +50,8 @@ impl Room {
         let game = self.game();
         let current_member_id = game
             .current_turn
-            .and_then(|turn| game.turn_order.get(turn).copied());
+            .and_then(|turn| game.characters.get_index(turn))
+            .map(|(id, _)| *id);
         let is_bot_turn = current_member_id
             .and_then(|id| game.characters.get(&id))
             .is_some_and(|member| member.controller == MemberId::Bot);
@@ -73,7 +73,11 @@ impl Room {
             .into_iter()
             .filter_map(|id| {
                 let member = game.characters.get(&id)?;
-                let stats = game.stats.get(&id).copied().unwrap_or_default();
+                let stats = game
+                    .characters
+                    .get(&id)
+                    .map(|c| c.stats)
+                    .unwrap_or_default();
                 Some(GameMemberState {
                     id,
                     team_id: member.team_id,
@@ -109,12 +113,10 @@ impl Room {
                 mass,
             })
             .collect();
-        let winner_team = game.characters.iter().find_map(|(&id, member)| {
-            game.stats
-                .get(&id)
-                .is_some_and(|stats| stats.wins > 0)
-                .then_some(member.team_id)
-        });
+        let winner_team = game
+            .characters
+            .iter()
+            .find_map(|(_, member)| (member.stats.wins > 0).then_some(member.team_id));
 
         GameViewState {
             width: game.board.size().w(),
@@ -129,7 +131,6 @@ impl Room {
             can_skip: is_human_turn && !needs_first_move,
             is_started: game.is_started(),
             is_game_over: self.has_started() && !game.is_started(),
-            automatic_distribution: game.automatic_distribution,
             winner_team,
         }
     }

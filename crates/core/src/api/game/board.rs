@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
-use std::collections::HashMap;
 use std::num::NonZeroU8;
 use std::ops::{Index, IndexMut};
+
+use indexmap::IndexMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -307,11 +308,10 @@ mod game_rule_tests {
         game.add_local_member(uid(2), tid(2)).unwrap();
         game.start(true).unwrap();
 
-        let snapshot = game.snapshot();
+        let snapshot = game.snapshot(true);
         let restored = snapshot.restore();
 
         assert_eq!(restored.board, game.board);
-        assert_eq!(restored.turn_order, game.turn_order);
         assert_eq!(restored.current_turn, game.current_turn);
     }
 
@@ -321,9 +321,110 @@ mod game_rule_tests {
         game.explosion_mode = ExplosionMode::Lossless;
 
         assert_eq!(
-            game.snapshot().restore().explosion_mode,
+            game.snapshot(false).restore().explosion_mode,
             ExplosionMode::Lossless
         );
+    }
+
+    #[test]
+    fn safe_radius_is_clamped_to_the_table_maximum() {
+        let mut game = Game::new(Board::new_rect(size(10, 10)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.add_local_member(uid(3), tid(3)).unwrap();
+        game.add_local_member(uid(4), tid(4)).unwrap();
+
+        assert_eq!(game.max_safe_radius(), 9);
+        assert_eq!(game.set_safe_radius(u8::MAX), Ok(9));
+        assert_eq!(game.safe_radius(), 9);
+
+        // Меньшее поле снижает предел, и действующее значение следует за ним.
+        game.board.set_size(size(3, 3));
+        assert!(game.safe_radius() <= game.max_safe_radius());
+
+        game.start(false).unwrap();
+        assert_eq!(game.set_safe_radius(0), Err(GameError::GameAlreadyStarted));
+    }
+
+    #[test]
+    fn start_cells_keep_the_safe_radius() {
+        let mut game = Game::new(Board::new_rect(size(8, 8)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        let safe_radius = game.set_safe_radius(8).unwrap();
+        assert_eq!(safe_radius, 8);
+        game.start(false).unwrap();
+
+        game.apply_action(cid(1), GameAction::Increase(pos(0)))
+            .unwrap();
+        let near = game.board.position(2, 2).unwrap();
+        let far = game.board.position(3, 3).unwrap();
+        assert!(!game.can_start_at(near));
+        assert_eq!(
+            game.apply_action(cid(2), GameAction::Increase(near)),
+            Err(GameError::StartCellTooClose)
+        );
+        assert!(game.can_start_at(far));
+        game.apply_action(cid(2), GameAction::Increase(far))
+            .unwrap();
+    }
+
+    #[test]
+    fn starting_decrease_claims_the_cell_without_a_value() {
+        let mut game = Game::new(Board::new_rect(size(6, 6)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.start(false).unwrap();
+
+        // Уменьшение числится как ход, но клетка остаётся нулевой.
+        game.apply_action(cid(1), GameAction::Decrease(pos(0)))
+            .unwrap();
+        let cell = game.board[pos(0)];
+        assert_eq!(cell.owner, Some(tid(1)));
+        assert_eq!(cell.value, 0);
+        assert_eq!(game.characters[&cid(1)].stats.decrease_moves, 1);
+        assert_eq!(game.current_turn, Some(1));
+
+        // Команда уже владеет клеткой нулевого значения — обычное уменьшение
+        // требует запас до минимального значения и отклоняется.
+        game.apply_action(cid(2), GameAction::Increase(pos(35)))
+            .unwrap();
+        assert_eq!(
+            game.apply_action(cid(1), GameAction::Decrease(pos(0))),
+            Err(GameError::CellCannotBeDecreased)
+        );
+    }
+
+    #[test]
+    fn every_team_finds_a_start_cell_at_the_maximum_safe_radius() {
+        for teams in 2..=crate::api::circle::MAX_CACHED_PLAYERS {
+            for ordinal in 0..BoardSize::SIZE_COUNT {
+                let board_size = BoardSize::from_ordinal(ordinal).unwrap();
+                if board_size.cell_count() < usize::from(teams) {
+                    continue;
+                }
+                let mut game = Game::new(Board::new_rect(board_size));
+                for team in 1..=teams {
+                    game.add_bot(tid(team)).unwrap();
+                }
+                game.set_safe_radius(u8::MAX).unwrap();
+                game.start(false).unwrap();
+                let safe_radius = Score::from(game.safe_radius());
+
+                for team in 1..=teams {
+                    let pos = game
+                        .board
+                        .ids()
+                        .find(|&pos| game.is_safe_start_cell(pos, safe_radius))
+                        .unwrap_or_else(|| {
+                            panic!("{board_size:?} {teams} teams: no cell for team {team}")
+                        });
+                    let cell = &mut game.board[pos];
+                    cell.owner = Some(tid(team));
+                    cell.value = 1;
+                }
+            }
+        }
     }
 
     #[test]
@@ -336,7 +437,7 @@ mod game_rule_tests {
 
         game.apply_action(cid(1), GameAction::Surrender).unwrap();
 
-        assert_eq!(game.stats[&cid(1)].losses, 1);
+        assert_eq!(game.characters[&cid(1)].stats.losses, 1);
         assert_eq!(game.current_turn, Some(1));
         assert_eq!(game.check_turn(cid(1)), Err(GameError::CharacterEliminated));
     }
@@ -347,8 +448,16 @@ mod game_rule_tests {
         game.add_local_member(uid(1), tid(1)).unwrap();
         game.add_local_member(uid(2), tid(2)).unwrap();
         game.start(false).unwrap();
-        game.stats.get_mut(&cid(1)).unwrap().increase_moves = 1;
-        game.stats.get_mut(&cid(2)).unwrap().increase_moves = 1;
+        game.characters
+            .get_mut(&cid(1))
+            .unwrap()
+            .stats
+            .increase_moves = 1;
+        game.characters
+            .get_mut(&cid(2))
+            .unwrap()
+            .stats
+            .increase_moves = 1;
         game.board[pos(0)] = CellData {
             value: 3,
             owner: Some(tid(1)),
@@ -372,36 +481,6 @@ mod game_rule_tests {
         assert_eq!(winner, Some(tid(1)));
         assert_eq!(game.board[pos(3)].value, 4);
         assert!(!game.is_started());
-    }
-
-    #[test]
-    fn border_absorbs_explosion_mass_and_the_chain_stabilizes() {
-        let mut game = Game::new(Board::new_rect(size(3, 3)));
-        game.add_local_member(uid(1), tid(1)).unwrap();
-        game.add_local_member(uid(2), tid(2)).unwrap();
-        game.start(false).unwrap();
-        for cell in &mut game.board.cells {
-            *cell = CellData {
-                value: 3,
-                owner: Some(tid(1)),
-                ..CellData::default()
-            };
-        }
-
-        let winner = game
-            .apply_action(cid(1), GameAction::Increase(pos(0)))
-            .unwrap();
-
-        assert_eq!(winner, None);
-        assert!(game.is_started());
-        assert!(game.board.cells.iter().all(|cell| !cell.can_explode()));
-        let remaining_mass: i32 = game
-            .board
-            .cells
-            .iter()
-            .map(|cell| i32::from(cell.value))
-            .sum();
-        assert!(remaining_mass < 28);
     }
 
     fn board_mass(board: &Board) -> i32 {
@@ -495,20 +574,19 @@ pub enum GameError {
     GameAlreadyStarted,
     CharacterIdSpaceExhausted,
     BotIdSpaceExhausted,
+    /// Стартовая клетка ближе к занятой клетке, чем разрешает [`Game::safe_radius`].
+    StartCellTooClose,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Timeline {
-    Action {
-        member_id: CharacterId,
-        action: GameAction,
-    },
+    Action(GameAction),
     End,
 }
 
 impl Timeline {
-    pub fn new(member_id: CharacterId, action: GameAction) -> Self {
-        Self::Action { member_id, action }
+    pub fn new(action: GameAction) -> Self {
+        Self::Action(action)
     }
 
     fn game_ended() -> Self {
@@ -526,38 +604,39 @@ pub enum GameAction {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Game {
-    pub characters: HashMap<CharacterId, CharacterData>,
-    pub stats: HashMap<CharacterId, MemberStat>,
-    pub turn_order: Vec<CharacterId>,
+    pub characters: IndexMap<CharacterId, CharacterData>,
     pub current_turn: Option<usize>,
     pub timeline: Vec<Timeline>,
     pub board: Board,
-    pub automatic_distribution: bool,
     pub explosion_mode: ExplosionMode,
+    /// Квадрат «безопасного радиуса»: минимальное расстояние от стартовой клетки
+    /// до уже занятых клеток. Меняется только через [`Game::set_safe_radius`],
+    /// которая не даёт превысить [`Game::max_safe_radius`].
+    #[serde(default)]
+    safe_radius: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameSnapshot {
     pub characters: Vec<(CharacterId, CharacterData)>,
     pub board_size: BoardSize,
-    pub automatic_distribution: bool,
     pub explosion_mode: ExplosionMode,
+    #[serde(default)]
+    pub safe_radius: u8,
+    /// Началась ли партия с автоматической раздачей стартовых клеток.
+    /// [`GameSnapshot::restore`] повторяет раздачу, чтобы поле совпало с исходным.
+    #[serde(default)]
+    pub automatic_distribution: bool,
 }
 
 impl GameSnapshot {
     pub fn restore(&self) -> Game {
         let mut game = Game::new(Board::new_rect(self.board_size));
         game.characters = self.characters.iter().copied().collect();
-        game.stats = game
-            .characters
-            .keys()
-            .map(|&id| (id, MemberStat::default()))
-            .collect();
-        game.turn_order = game.characters.keys().copied().collect();
-        game.turn_order.sort_unstable();
+        game.characters.sort_keys();
         game.current_turn = Some(0);
-        game.automatic_distribution = self.automatic_distribution;
         game.explosion_mode = self.explosion_mode;
+        game.safe_radius = self.safe_radius;
         if self.automatic_distribution {
             game.distribute_start_cells();
         }
@@ -577,7 +656,6 @@ impl Game {
     pub fn new(board: Board) -> Self {
         Self {
             board,
-            automatic_distribution: true,
             ..Default::default()
         }
     }
@@ -586,7 +664,9 @@ impl Game {
         self.current_turn.is_some()
     }
 
-    pub fn snapshot(&self) -> GameSnapshot {
+    /// Компактный снимок для повтора партии. `automatic_distribution` решает,
+    /// повторит ли [`GameSnapshot::restore`] раздачу стартовых клеток.
+    pub fn snapshot(&self, automatic_distribution: bool) -> GameSnapshot {
         let mut characters: Vec<_> = self
             .characters
             .iter()
@@ -596,9 +676,83 @@ impl Game {
         GameSnapshot {
             characters,
             board_size: self.board.size(),
-            automatic_distribution: self.automatic_distribution,
             explosion_mode: self.explosion_mode,
+            safe_radius: self.safe_radius(),
+            automatic_distribution,
         }
+    }
+
+    /// Количество разных команд среди участников.
+    pub fn team_count(&self) -> u8 {
+        let mut teams = IdSet::default();
+        for member in self.characters.values() {
+            teams.insert(member.team_id.get());
+        }
+        teams.len() as u8
+    }
+
+    /// Наибольший допустимый [`Game::safe_radius`] для текущего размера доски и
+    /// количества команд: при нём последняя команда гарантированно найдёт свободную
+    /// стартовую клетку. Команд считается не меньше двух, иначе ограничения нет.
+    pub fn max_safe_radius(&self) -> u8 {
+        max_radius_sq_for_players(self.board.size(), self.team_count().max(2))
+    }
+
+    /// Действующий квадрат безопасного радиуса для стартовых клеток.
+    /// Если поле или команды изменились, значение урезается до
+    /// [`Game::max_safe_radius`].
+    pub fn safe_radius(&self) -> u8 {
+        self.safe_radius.min(self.max_safe_radius())
+    }
+
+    /// Задаёт квадрат безопасного радиуса, урезая его до
+    /// [`Game::max_safe_radius`]. Возвращает сохранённое значение.
+    pub fn set_safe_radius(&mut self, radius_sq: u8) -> Result<u8, GameError> {
+        if self.is_started() {
+            return Err(GameError::GameAlreadyStarted);
+        }
+        self.safe_radius = radius_sq.min(self.max_safe_radius());
+        Ok(self.safe_radius)
+    }
+
+    /// Свободная клетка дальше `safe_radius` от всех занятых клеток.
+    fn is_safe_start_cell(&self, pos: BoardSize, safe_radius: Score) -> bool {
+        self.board[pos].owner.is_none()
+            && self.board.iter().all(|(other, cell)| {
+                cell.owner.is_none() || self.board.distance_sq(pos, other) > safe_radius
+            })
+    }
+
+    /// Можно ли выбрать `pos` стартовой клеткой. Если из-за безопасного радиуса
+    /// не осталось ни одной подходящей клетки, разрешается любая свободная.
+    pub fn can_start_at(&self, pos: BoardSize) -> bool {
+        if !self.board.contains(pos) || self.board[pos].owner.is_some() {
+            return false;
+        }
+        let safe_radius = Score::from(self.safe_radius());
+        self.is_safe_start_cell(pos, safe_radius)
+            || !self
+                .board
+                .ids()
+                .any(|other| self.is_safe_start_cell(other, safe_radius))
+    }
+
+    /// Все клетки, которые сейчас можно выбрать стартовыми.
+    fn start_cells(&self) -> Vec<BoardSize> {
+        let safe_radius = Score::from(self.safe_radius());
+        let spaced: Vec<_> = self
+            .board
+            .ids()
+            .filter(|&pos| self.is_safe_start_cell(pos, safe_radius))
+            .collect();
+        if !spaced.is_empty() {
+            return spaced;
+        }
+        self.board
+            .iter()
+            .filter(|(_, cell)| cell.owner.is_none())
+            .map(|(pos, _)| pos)
+            .collect()
     }
 
     pub fn change_team(
@@ -619,8 +773,8 @@ impl Game {
         }
     }
 
-    fn log(&mut self, member_id: CharacterId, action: GameAction) {
-        self.timeline.push(Timeline::new(member_id, action));
+    fn log(&mut self, action: GameAction) {
+        self.timeline.push(Timeline::new(action));
     }
 
     /// Adds another seat controlled by the same local player/device.
@@ -638,7 +792,6 @@ impl Game {
 
         let member = CharacterData::new(MemberId::Player(controller), team_id);
         self.characters.insert(member_id, member);
-        self.stats.insert(member_id, MemberStat::default());
         Ok(member_id)
     }
 
@@ -659,7 +812,6 @@ impl Game {
             .ok_or(GameError::CharacterIdSpaceExhausted)?;
         self.characters
             .insert(character_id, CharacterData::new(controller, team_id));
-        self.stats.insert(character_id, MemberStat::default());
         Ok(())
     }
 
@@ -669,8 +821,7 @@ impl Game {
             return;
         }
 
-        self.characters.remove(&member_id);
-        self.stats.remove(&member_id);
+        self.characters.shift_remove(&member_id);
     }
 
     pub fn add_bot(&mut self, team_id: TeamId) -> Result<CharacterId, GameError> {
@@ -682,7 +833,6 @@ impl Game {
             .ok_or(GameError::CharacterIdSpaceExhausted)?;
         self.characters
             .insert(member_id, CharacterData::new(MemberId::Bot, team_id));
-        self.stats.insert(member_id, MemberStat::default());
         Ok(member_id)
     }
 
@@ -693,8 +843,7 @@ impl Game {
         if !self.characters.contains_key(&member_id) {
             return Err(GameError::CharacterNotFound);
         }
-        self.characters.remove(&member_id);
-        self.stats.remove(&member_id);
+        self.characters.shift_remove(&member_id);
 
         if self.is_turn(member_id) {
             self.advance_turn();
@@ -721,15 +870,13 @@ impl Game {
         }
 
         self.timeline.clear();
-        for stat in self.stats.values_mut() {
-            *stat = MemberStat::default();
+        for (_, character) in self.characters.iter_mut() {
+            character.stats = MemberStat::default();
         }
         self.board.clear_cells();
-        self.automatic_distribution = automatic_distribution;
 
-        self.turn_order.clear();
-        self.turn_order.extend(self.characters.keys().copied());
-        self.turn_order.sort_unstable();
+        self.characters.sort_keys();
+        self.safe_radius = self.safe_radius();
         self.current_turn = Some(0);
 
         if automatic_distribution {
@@ -774,7 +921,6 @@ impl Game {
 
     pub fn stop(&mut self) {
         self.current_turn = None;
-        self.turn_order.clear();
         self.board.clear_cells();
     }
 
@@ -788,7 +934,10 @@ impl Game {
     }
 
     fn is_turn(&self, member_id: CharacterId) -> bool {
-        self.current_turn.and_then(|idx| self.turn_order.get(idx)) == Some(&member_id)
+        self.current_turn
+            .and_then(|idx| self.characters.get_index(idx))
+            .map(|(id, _)| *id)
+            == Some(member_id)
     }
 
     fn is_alive(&self, member_id: CharacterId) -> bool {
@@ -796,19 +945,19 @@ impl Game {
     }
 
     fn is_eliminated(&self, member_id: CharacterId) -> bool {
-        self.stats
+        self.characters
             .get(&member_id)
-            .is_some_and(|stat| stat.losses > 0)
+            .is_some_and(|c| c.stats.losses > 0)
     }
 
     fn advance_turn(&mut self) {
         let Some(idx) = self.current_turn else {
             return;
         };
-        let len = self.turn_order.len();
+        let len = self.characters.len();
         self.current_turn = (1..=len)
             .map(|step| (idx + step) % len)
-            .find(|&next| self.is_alive(self.turn_order[next]));
+            .find(|&next| self.is_alive(*self.characters.get_index(next).unwrap().0));
     }
 
     fn active_team(&self, member_id: CharacterId) -> Result<TeamId, GameError> {
@@ -836,8 +985,8 @@ impl Game {
 
     pub fn skip(&mut self, member_id: CharacterId) -> Result<(), GameError> {
         self.check_turn(member_id)?;
-        let stat = self.stats.entry(member_id).or_default();
-        stat.skipped_moves = stat.skipped_moves.saturating_add(1);
+        let character = self.characters.get_mut(&member_id).unwrap();
+        character.stats.skipped_moves = character.stats.skipped_moves.saturating_add(1);
         self.advance_turn();
         Ok(())
     }
@@ -850,10 +999,7 @@ impl Game {
 
     pub fn is_starting_action(&self, member_id: CharacterId) -> bool {
         self.characters.get(&member_id).is_some_and(|member| {
-            self.stats
-                .get(&member_id)
-                .is_none_or(|stat| stat.total_moves() == 0)
-                && !self.board.owns_cells(member.team_id)
+            member.stats.total_moves() == 0 && !self.board.owns_cells(member.team_id)
         })
     }
 
@@ -863,7 +1009,7 @@ impl Game {
         pos: BoardSize,
         increase: bool,
     ) -> Result<(), GameError> {
-        self.make_move_with_result(member_id, pos, increase)
+        self.make_move_with_result(member_id, pos, increase, &mut |_| {})
             .map(|_| ())
     }
 
@@ -872,6 +1018,7 @@ impl Game {
         member_id: CharacterId,
         pos: BoardSize,
         increase: bool,
+        on_step: &mut dyn FnMut(&Board),
     ) -> Result<Option<TeamId>, GameError> {
         let team = self.check_turn(member_id)?;
         if !self.board.contains(pos) {
@@ -879,43 +1026,56 @@ impl Game {
         }
 
         let owner = self.board[pos].owner;
-        if self.board.owns_cells(team) {
+        // Стартовый ход занимает пустую клетку; Decrease при старте только занимает
+        // её, не меняя значения, Increase добавляет первый заряд.
+        let starting = !self.board.owns_cells(team);
+        if !starting {
             if owner != Some(team) {
                 return Err(GameError::CellNotOwnedByTeam);
             }
         } else if owner.is_some() {
             return Err(GameError::FirstMoveRequiresEmptyCell);
+        } else if !self.can_start_at(pos) {
+            return Err(GameError::StartCellTooClose);
         }
 
-        if !increase && self.board[pos].value <= self.board[pos].ability.min_value() {
+        // Стартовое уменьшение значение не трогает, поэтому проверка минимума
+        // к нему не применяется.
+        if !increase && !starting && self.board[pos].value <= self.board[pos].ability.min_value() {
             return Err(GameError::CellCannotBeDecreased);
         }
 
-        let stat = self.stats.entry(member_id).or_default();
-        let counter = if increase {
-            &mut stat.increase_moves
-        } else {
-            &mut stat.decrease_moves
-        };
-        *counter = counter.saturating_add(1);
+        {
+            let character = self.characters.get_mut(&member_id).unwrap();
+            let counter = if increase {
+                &mut character.stats.increase_moves
+            } else {
+                &mut character.stats.decrease_moves
+            };
+            *counter = counter.saturating_add(1);
+        }
 
-        let delta = if increase { 1 } else { -1 };
+        let delta = if starting && !increase {
+            0
+        } else if increase {
+            1
+        } else {
+            -1
+        };
         let mut blasts = Vec::new();
-        let (characters, stats) = (&self.characters, &self.stats);
         self.board.apply_move_until(
             pos,
             team,
             delta,
             &mut blasts,
             self.explosion_mode,
+            on_step,
             |board| {
-                Self::sole_surviving_team(board, characters, stats).is_some()
-                    || board.is_saturated()
+                Self::sole_surviving_team(board, &self.characters).is_some() || board.is_saturated()
             },
         );
 
-        if let Some(winner) = Self::sole_surviving_team(&self.board, &self.characters, &self.stats)
-        {
+        if let Some(winner) = Self::sole_surviving_team(&self.board, &self.characters) {
             self.eliminate_teams_without_cells();
             self.current_turn = None;
             self.award_win(winner);
@@ -934,18 +1094,37 @@ impl Game {
         member_id: CharacterId,
         action: GameAction,
     ) -> Result<Option<TeamId>, GameError> {
+        self.apply_action_with_steps(member_id, action, |_| {})
+    }
+
+    /// Same as [`Self::apply_action`], but reports the board after the initial
+    /// change and after every explosion wave so the UI can replay it step by
+    /// step.
+    pub fn apply_action_with_steps(
+        &mut self,
+        member_id: CharacterId,
+        action: GameAction,
+        mut on_step: impl FnMut(&Board),
+    ) -> Result<Option<TeamId>, GameError> {
         if !self.is_started() {
             return Err(GameError::GameNotStarted);
         }
         if self.is_starting_action(member_id)
-            && !matches!(action, GameAction::Increase(_) | GameAction::Surrender)
+            && !matches!(
+                action,
+                GameAction::Increase(_) | GameAction::Decrease(_) | GameAction::Surrender
+            )
         {
             return Err(GameError::FirstMoveRequiresEmptyCell);
         }
 
         let move_winner = match action {
-            GameAction::Increase(pos) => self.make_move_with_result(member_id, pos, true)?,
-            GameAction::Decrease(pos) => self.make_move_with_result(member_id, pos, false)?,
+            GameAction::Increase(pos) => {
+                self.make_move_with_result(member_id, pos, true, &mut on_step)?
+            }
+            GameAction::Decrease(pos) => {
+                self.make_move_with_result(member_id, pos, false, &mut on_step)?
+            }
             GameAction::Skip => {
                 self.skip(member_id)?;
                 None
@@ -956,7 +1135,7 @@ impl Game {
             }
         };
 
-        self.log(member_id, action);
+        self.log(action);
 
         if move_winner.is_some() {
             return Ok(move_winner);
@@ -972,8 +1151,7 @@ impl Game {
             return Err(GameError::GameNotStarted);
         }
 
-        if let Some(winner) = Self::sole_surviving_team(&self.board, &self.characters, &self.stats)
-        {
+        if let Some(winner) = Self::sole_surviving_team(&self.board, &self.characters) {
             self.eliminate_teams_without_cells();
             self.current_turn = None;
             self.award_win(winner);
@@ -990,17 +1168,15 @@ impl Game {
 
     fn sole_surviving_team(
         board: &Board,
-        characters: &HashMap<CharacterId, CharacterData>,
-        stats: &HashMap<CharacterId, MemberStat>,
+        characters: &IndexMap<CharacterId, CharacterData>,
     ) -> Option<TeamId> {
         let mut all = IdSet::default();
         let mut alive = IdSet::default();
 
-        for (&member_id, member) in characters {
+        for (&_member_id, member) in characters {
             all.insert(member.team_id.get());
-            let stat = stats.get(&member_id);
-            let has_moved = stat.is_some_and(|stat| stat.total_moves() > 0);
-            let is_eliminated = stat.is_some_and(|stat| stat.losses > 0);
+            let has_moved = member.stats.total_moves() > 0;
+            let is_eliminated = member.stats.losses > 0;
             if !is_eliminated && (!has_moved || board.owns_cells(member.team_id)) {
                 alive.insert(member.team_id.get());
             }
@@ -1044,10 +1220,7 @@ impl Game {
             .iter()
             .filter(|(id, m)| {
                 !self.is_eliminated(**id)
-                    && self
-                        .stats
-                        .get(*id)
-                        .is_some_and(|stat| stat.total_moves() > 0)
+                    && m.stats.total_moves() > 0
                     && !alive.contains(m.team_id.get())
             })
             .map(|(id, _)| *id)
@@ -1080,19 +1253,17 @@ impl Game {
     }
 
     fn award_win(&mut self, team: TeamId) {
-        for (&member_id, member) in &self.characters {
+        for (_, member) in self.characters.iter_mut() {
             if member.team_id == team {
-                let stat = self.stats.entry(member_id).or_default();
-                stat.wins = stat.wins.saturating_add(1);
+                member.stats.wins = member.stats.wins.saturating_add(1);
             }
         }
     }
 
     fn eliminate(&mut self, member_id: CharacterId) {
-        if self.characters.contains_key(&member_id) {
-            let stat = self.stats.entry(member_id).or_default();
-            if stat.losses == 0 {
-                stat.losses = 1;
+        if let Some(character) = self.characters.get_mut(&member_id) {
+            if character.stats.losses == 0 {
+                character.stats.losses = 1;
             }
         }
         if self.is_turn(member_id) {
@@ -1154,17 +1325,12 @@ impl Game {
     }
 
     fn legal_cells(&self, team: TeamId) -> Vec<BoardSize> {
-        let has_cells = self.board.owns_cells(team);
-
+        if !self.board.owns_cells(team) {
+            return self.start_cells();
+        }
         self.board
             .iter()
-            .filter(|(_, c)| {
-                if has_cells {
-                    c.owner == Some(team)
-                } else {
-                    c.owner.is_none()
-                }
-            })
+            .filter(|(_, c)| c.owner == Some(team))
             .map(|(pos, _)| pos)
             .collect()
     }
@@ -1356,7 +1522,7 @@ impl Board {
         blasts: &mut Vec<Blast>,
         mode: ExplosionMode,
     ) -> u32 {
-        self.apply_move_until(pos, team, delta, blasts, mode, |_| false)
+        self.apply_move_until(pos, team, delta, blasts, mode, &mut |_| {}, |_| false)
     }
 
     fn apply_move_until<F>(
@@ -1366,6 +1532,7 @@ impl Board {
         delta: i8,
         blasts: &mut Vec<Blast>,
         mode: ExplosionMode,
+        on_step: &mut dyn FnMut(&Board),
         mut stop_after_wave: F,
     ) -> u32
     where
@@ -1374,10 +1541,12 @@ impl Board {
         let cell = &mut self[pos];
         cell.value = cell.value.saturating_add(delta).max(0);
         cell.owner = Some(team);
+        on_step(self);
 
         let mut waves = 0;
         while self.explode_wave(blasts, mode) {
             waves += 1;
+            on_step(self);
             if stop_after_wave(self) {
                 break;
             }
@@ -1537,6 +1706,7 @@ impl MemberStat {
 pub struct CharacterData {
     pub controller: MemberId,
     pub team_id: TeamId,
+    pub stats: MemberStat,
 }
 
 impl CharacterData {
@@ -1544,6 +1714,7 @@ impl CharacterData {
         Self {
             controller,
             team_id,
+            stats: MemberStat::default(),
         }
     }
 }

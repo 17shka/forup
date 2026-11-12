@@ -251,6 +251,7 @@ pub struct Room {
     rights: GameRights,
     bots: HashMap<CharacterId, BotConfig>,
     game: Game,
+    automatic_distribution: bool,
     has_started: bool,
     history_store: Option<GameStore>,
     game_id: Option<GameId>,
@@ -272,6 +273,7 @@ impl Room {
             rights: GameRights::default(),
             bots: HashMap::new(),
             game,
+            automatic_distribution: true,
             has_started: false,
             history_store: None,
             game_id: None,
@@ -413,7 +415,7 @@ impl Room {
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
-        self.game.automatic_distribution = automatic;
+        self.automatic_distribution = automatic;
         Ok(())
     }
 
@@ -432,6 +434,13 @@ impl Room {
             ExplosionMode::Lossy
         };
         Ok(())
+    }
+
+    /// Sets the squared safe radius for start cells. The value is clamped to
+    /// [`Game::max_safe_radius`]; the stored value is returned.
+    pub fn set_safe_radius(&mut self, actor: Uuid, radius_sq: u8) -> Result<u8, RoomError> {
+        self.ensure_game_rule(actor)?;
+        Ok(self.game.set_safe_radius(radius_sq)?)
     }
 
     /// Replaces the room-wide policy. Only administrators may do this.
@@ -464,10 +473,10 @@ impl Room {
 
     pub fn reset(&mut self) {
         let size = self.game.board.size();
-        let automatic_distribution = self.game.automatic_distribution;
         let explosion_mode = self.game.explosion_mode;
+        let safe_radius = self.game.safe_radius();
+        let automatic = self.automatic_distribution;
         let mut game = Game::new(Board::new_rect(size));
-        game.automatic_distribution = automatic_distribution;
         game.explosion_mode = explosion_mode;
 
         // Re-seat every member on their own team so the lobby stays consistent
@@ -483,7 +492,10 @@ impl Room {
             member.status = Status::NotReady;
         }
 
+        // Clamp against the re-seated teams: the limit depends on their count.
+        let _ = game.set_safe_radius(safe_radius);
         self.game = game;
+        self.automatic_distribution = automatic;
         self.bots.clear();
         self.has_started = false;
         self.game_id = None;
@@ -494,7 +506,7 @@ impl Room {
         while game.is_started() {
             let Some(member_id) = game
                 .current_turn
-                .and_then(|turn| game.turn_order.get(turn).copied())
+                .and_then(|turn| game.characters.get_index(turn).map(|(id, _)| *id))
             else {
                 break;
             };
@@ -743,7 +755,7 @@ impl Room {
 
         if let Some(store) = &self.history_store {
             let game_id = store
-                .start_game(self.id.get(), &game)
+                .start_game(self.id.get(), &game, automatic_distribution)
                 .map_err(RoomError::History)?;
             self.game_id = Some(game_id);
         }
@@ -1290,10 +1302,7 @@ mod tests {
         assert_eq!(history.timeline.len(), 2);
         assert_eq!(
             history.timeline[0],
-            Timeline::Action {
-                member_id: owner_character,
-                action: GameAction::Increase(pos(0)),
-            }
+            Timeline::Action(GameAction::Increase(pos(0))),
         );
         assert_eq!(history.timeline[1], Timeline::End);
         let replayed = history.replay().unwrap();
@@ -1337,7 +1346,6 @@ mod tests {
         let lobby = room.view_state();
         // Ширина и высота нормализуются: 6 × 5 и 5 × 6 — один размер.
         assert_eq!((lobby.width, lobby.height), (5, 6));
-        assert!(!lobby.automatic_distribution);
         assert_eq!(lobby.members.len(), 3);
         assert_eq!(lobby.teams.len(), 3);
         assert!(lobby.members.iter().any(|member| member.is_bot));
@@ -1367,7 +1375,6 @@ mod tests {
         empty.set_ready(uid(10), true).unwrap();
         empty.start(uid(10), false).unwrap();
         let started = empty.view_state();
-        assert!(!started.automatic_distribution);
         assert!(!started.can_decrease);
         assert!(!started.can_skip);
         assert!(started.teams.iter().all(|team| team.cell_count == 0));
@@ -1393,7 +1400,7 @@ mod tests {
 
         assert!(after_skip.is_started);
         assert_eq!(after_skip.current_member_id, Some(player_id));
-        assert_eq!(room.game().stats[&player_id].skipped_moves, 1);
+        assert_eq!(room.game().characters[&player_id].stats.skipped_moves, 1);
         assert_eq!(room.game().timeline.len(), 2);
 
         room.apply_action(uid(10), player_id, GameAction::Surrender)

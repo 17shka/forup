@@ -54,7 +54,7 @@ leptos = { version = "0.8.23", default-features = false }
 leptos_meta = "0.8"
 leptos_router = { version = "0.8.17" }
 leptos-use = "0.20.0"
-leptos_i18n = { version = "0.6.2", default-features = false }
+leptos_i18n = { version = "0.6.3", default-features = false }
 postcard = { version = "1.1.3", features = ["alloc"], optional = true }
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 # thaw 0.4.x targets Leptos 0.7; 0.5.0-beta is the Leptos 0.8-compatible release.

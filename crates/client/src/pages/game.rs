@@ -151,6 +151,7 @@ pub fn GamePage() -> impl IntoView {
             GameError::FirstMoveRequiresEmptyCell => {
                 t_string!(i18n, error_first_move_empty).to_string()
             }
+            GameError::StartCellTooClose => t_string!(i18n, error_start_too_close).to_string(),
             GameError::CellNotOwnedByTeam => t_string!(i18n, error_cell_not_owned).to_string(),
             GameError::CellCannotBeDecreased => {
                 t_string!(i18n, error_cell_cannot_decrease).to_string()
@@ -211,8 +212,20 @@ pub fn GamePage() -> impl IntoView {
         class
     };
 
+    // A start cell is claimed with Increase by default; while one is being
+    // picked the mode buttons stay hidden, so snap the mode back here.
+    Effect::new(move |previous: Option<bool>| {
+        let choosing = session.state.with(|game| game.is_choosing_start_cell());
+        if choosing && !previous.unwrap_or(false) {
+            session.mode.set(MoveMode::Increase);
+        }
+        choosing
+    });
+
     view! {
         <div class="page game-page">
+
+            <TeamsPanel/>
 
             <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
                 <div class=banner_class>
@@ -247,6 +260,13 @@ pub fn GamePage() -> impl IntoView {
                             let disabled = move || {
                                 let selected = mode.get();
                                 session.state.with(|game| {
+                                    // A starting Decrease just claims an empty
+                                    // cell, so the usual checks do not apply.
+                                    if selected == MoveMode::Decrease
+                                        && game.is_choosing_start_cell()
+                                    {
+                                        return !game.can_move_to(pos);
+                                    }
                                     let empty_decrease = selected == MoveMode::Decrease
                                         && game
                                             .game
@@ -296,25 +316,33 @@ pub fn GamePage() -> impl IntoView {
                         when=move || session.state.with(|game| game.phase == GamePhase::Playing)
                     >
                         <div class="mode-toggle" role="group">
-                            <Button
-                                class=Signal::derive(move || mode_class(MoveMode::Decrease))
-                                size=ButtonSize::Small
-                                appearance=ButtonAppearance::Transparent
-                                disabled=move || !session.state.with(LocalGame::can_decrease)
-                                on_click=move |_| session.mode.set(MoveMode::Decrease)
+                            <Show
+                                when=move || {
+                                    !session
+                                        .state
+                                        .with(|game| game.is_choosing_start_cell())
+                                }
                             >
-                                <span class="mode-action__icon" aria-hidden="true">"−"</span>
-                                <span>{t!(i18n, decrease)}</span>
-                            </Button>
-                            <Button
-                                class=Signal::derive(move || mode_class(MoveMode::Increase))
-                                size=ButtonSize::Small
-                                appearance=ButtonAppearance::Transparent
-                                on_click=move |_| session.mode.set(MoveMode::Increase)
-                            >
-                                <span class="mode-action__icon" aria-hidden="true">"＋"</span>
-                                <span>{t!(i18n, increase)}</span>
-                            </Button>
+                                <Button
+                                    class=Signal::derive(move || mode_class(MoveMode::Decrease))
+                                    size=ButtonSize::Small
+                                    appearance=ButtonAppearance::Transparent
+                                    disabled=move || !session.state.with(LocalGame::can_decrease)
+                                    on_click=move |_| session.mode.set(MoveMode::Decrease)
+                                >
+                                    <span class="mode-action__icon" aria-hidden="true">"−"</span>
+                                    <span>{t!(i18n, decrease)}</span>
+                                </Button>
+                                <Button
+                                    class=Signal::derive(move || mode_class(MoveMode::Increase))
+                                    size=ButtonSize::Small
+                                    appearance=ButtonAppearance::Transparent
+                                    on_click=move |_| session.mode.set(MoveMode::Increase)
+                                >
+                                    <span class="mode-action__icon" aria-hidden="true">"＋"</span>
+                                    <span>{t!(i18n, increase)}</span>
+                                </Button>
+                            </Show>
                             <RotateBoardButton/>
                         </div>
                     </Show>
@@ -367,8 +395,6 @@ pub fn GamePage() -> impl IntoView {
             </div>
 
             <GameSettingsPanel/>
-
-            <TeamsPanel/>
         </div>
     }
 }

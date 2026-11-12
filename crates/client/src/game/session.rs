@@ -82,6 +82,7 @@ pub struct LocalGame {
     pub phase: GamePhase,
     pub winner: Option<TeamId>,
     pub validated_actions: Vec<GameAction>,
+    pub automatic_distribution: bool,
     /// Net mass change of every board slot during the current action burst.
     changes: Vec<i16>,
     /// Alternating value used to restart CSS animations on repeated changes.
@@ -99,6 +100,7 @@ impl LocalGame {
             phase: GamePhase::Lobby,
             winner: None,
             validated_actions: Vec::new(),
+            automatic_distribution: true,
             changes,
             animation_tick: 0,
         };
@@ -360,7 +362,8 @@ impl LocalGame {
         let mut losses = 0u16;
         let mut moves = 0u16;
         for character in &participant.characters {
-            if let Some(stat) = self.game.stats.get(character) {
+            if let Some(data) = self.game.characters.get(character) {
+                let stat = data.stats;
                 wins = wins.saturating_add(u16::from(stat.wins));
                 losses = losses.saturating_add(u16::from(stat.losses));
                 moves = moves.saturating_add(stat.total_moves());
@@ -413,13 +416,13 @@ impl LocalGame {
     }
 
     pub fn automatic_distribution(&self) -> bool {
-        self.game.automatic_distribution
+        self.automatic_distribution
     }
 
     pub fn set_automatic_distribution(&mut self, value: bool) {
         self.enter_edit_mode();
         if !self.game.is_started() {
-            self.game.automatic_distribution = value;
+            self.automatic_distribution = value;
         }
     }
 
@@ -438,12 +441,35 @@ impl LocalGame {
         }
     }
 
+    /// Квадрат безопасного радиуса для стартовых клеток.
+    pub fn safe_radius(&self) -> u8 {
+        self.game.safe_radius()
+    }
+
+    /// Верхняя граница [`Self::safe_radius`] для текущей доски и команд.
+    pub fn max_safe_radius(&self) -> u8 {
+        self.game.max_safe_radius()
+    }
+
+    pub fn set_safe_radius(&mut self, radius_sq: u8) -> Result<(), GameError> {
+        self.enter_edit_mode();
+        self.game.set_safe_radius(radius_sq).map(|_| ())
+    }
+
+    /// Ходящий сейчас участник ещё не выбрал стартовую клетку.
+    pub fn is_choosing_start_cell(&self) -> bool {
+        self.phase == GamePhase::Playing
+            && self
+                .current_character()
+                .is_some_and(|character| self.game.is_starting_action(character))
+    }
+
     // --- game -------------------------------------------------------------
 
     pub fn current_character(&self) -> Option<CharacterId> {
         self.game
             .current_turn
-            .and_then(|index| self.game.turn_order.get(index).copied())
+            .and_then(|index| self.game.characters.get_index(index).map(|(id, _)| *id))
     }
 
     pub fn current_is_bot(&self) -> bool {
@@ -495,12 +521,16 @@ impl LocalGame {
     pub fn next_participant_id(&self) -> Option<ParticipantId> {
         let current = self.current_participant_id()?;
         let start = self.game.current_turn?;
-        let len = self.game.turn_order.len();
+        let len = self.game.characters.len();
         if len == 0 {
             return None;
         }
         (1..=len).find_map(|step| {
-            let character = *self.game.turn_order.get((start + step) % len)?;
+            let character = self
+                .game
+                .characters
+                .get_index((start + step) % len)
+                .map(|(id, _)| *id)?;
             if self.is_eliminated(character) {
                 return None;
             }
@@ -560,7 +590,7 @@ impl LocalGame {
             return false;
         };
         if self.game.is_starting_action(character) {
-            cell.owner.is_none()
+            self.game.can_start_at(pos)
         } else {
             cell.owner == Some(team)
         }
@@ -574,7 +604,7 @@ impl LocalGame {
         // A finished match may still be "started" inside the engine; reset it
         // before starting the rematch.
         self.enter_edit_mode();
-        self.game.start(self.game.automatic_distribution)?;
+        self.game.start(self.automatic_distribution)?;
         self.phase = GamePhase::Playing;
         self.winner = None;
         self.validated_actions.clear();
@@ -726,7 +756,8 @@ impl LocalGame {
                         let mut losses = 0u16;
                         let mut moves = 0u16;
                         for character in &characters {
-                            if let Some(stat) = self.game.stats.get(character) {
+                            if let Some(data) = self.game.characters.get(character) {
+                                let stat = data.stats;
                                 wins = wins.saturating_add(u16::from(stat.wins));
                                 losses = losses.saturating_add(u16::from(stat.losses));
                                 moves = moves.saturating_add(stat.total_moves());
@@ -776,9 +807,10 @@ impl LocalGame {
 
     fn is_eliminated(&self, character: CharacterId) -> bool {
         self.game
-            .stats
+            .characters
             .get(&character)
-            .is_some_and(|stat| stat.losses > 0)
+            .map(|c| c.stats.losses > 0)
+            .unwrap_or(false)
     }
 
     fn next_team_id(&self) -> TeamId {
@@ -801,8 +833,8 @@ impl LocalGame {
             return;
         }
         self.game.stop();
-        for stat in self.game.stats.values_mut() {
-            *stat = MemberStat::default();
+        for character in self.game.characters.values_mut() {
+            character.stats = MemberStat::default();
         }
         self.phase = GamePhase::Lobby;
         self.winner = None;
@@ -869,13 +901,10 @@ impl LocalGame {
     }
 
     fn winner_from_stats(&self) -> Option<TeamId> {
-        self.game.characters.iter().find_map(|(&character, data)| {
-            self.game
-                .stats
-                .get(&character)
-                .is_some_and(|stat| stat.wins > 0)
-                .then_some(data.team_id)
-        })
+        self.game
+            .characters
+            .iter()
+            .find_map(|(&_character, data)| (data.stats.wins > 0).then_some(data.team_id))
     }
 }
 
@@ -1141,16 +1170,29 @@ mod tests {
     }
 
     #[test]
-    fn explosion_mode_is_a_match_setting() {
+    fn safe_radius_is_limited_by_the_board_and_teams() {
         let mut game = LocalGame::new();
-        assert!(!game.lossless_explosions());
+        let max = game.max_safe_radius();
+        assert!(max > 0);
 
-        game.set_lossless_explosions(true);
-        assert!(game.lossless_explosions());
+        game.set_safe_radius(u8::MAX).unwrap();
+        assert_eq!(game.safe_radius(), max);
 
         game.ready().unwrap();
-        game.set_lossless_explosions(false);
+        assert_eq!(game.set_safe_radius(0), Err(GameError::GameAlreadyStarted));
+    }
+
+    #[test]
+    fn explosion_mode_is_a_match_setting() {
+        let mut game = LocalGame::new();
         assert!(game.lossless_explosions());
+
+        game.set_lossless_explosions(false);
+        assert!(!game.lossless_explosions());
+
+        game.ready().unwrap();
+        game.set_lossless_explosions(true);
+        assert!(!game.lossless_explosions());
     }
 
     #[test]
