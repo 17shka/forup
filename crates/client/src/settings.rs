@@ -23,7 +23,7 @@ const EXPLOSION_DELAY_STORAGE_KEY: &str = "explosion_delay";
 /// step-by-step replay.
 pub const EXPLOSION_DELAY_MIN: f64 = 0.0;
 pub const EXPLOSION_DELAY_MAX: f64 = 0.5;
-pub const EXPLOSION_DELAY_STEP: f64 = 0.05;
+pub const EXPLOSION_DELAY_STEP: f64 = 0.01;
 const EXPLOSION_DELAY_DEFAULT: f64 = 0.15;
 
 #[derive(Clone, Copy)]

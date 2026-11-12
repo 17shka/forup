@@ -9,6 +9,7 @@ use thaw::{
 use crate::components::{GameSettingsPanel, RotateBoardButton, TeamsPanel};
 use crate::game::{Controller, GamePhase, GameSession, LocalGame, MoveMode};
 use crate::i18n::*;
+use crate::settings::Settings;
 
 /// Maps a display grid coordinate back to the board slot after `turn`
 /// clockwise quarter-turns. The game state is untouched: only the rendering
@@ -84,6 +85,7 @@ pub fn GamePage() -> impl IntoView {
     let i18n = use_i18n();
     let navigate = use_navigate();
     let session = GameSession::expect();
+    let settings = Settings::expect();
 
     // The board can be resized in the lobby, so keep the size in a memo: the
     // grid is rebuilt only when the size changes, while every cell stays bound
@@ -222,6 +224,41 @@ pub fn GamePage() -> impl IntoView {
         choosing
     });
 
+    // Насос анимации взрывов: пока ход доигрывается, планирует шаги
+    // `animation_step` с задержкой из настроек. Ползунок в drawer настроек
+    // отслеживается, поэтому смена настройки применяется сразу: ожидающийся
+    // шаг отменяется и переносится на новую задержку. Задержка 0 — мгновенный
+    // режим: ход доигрывается целиком без пауз. Движок ничего не ждёт.
+    let pump_generation = RwSignal::new(0u64);
+    Effect::new(move || {
+        let delay = settings.explosion_delay.get();
+        // Каждый перезапуск отменяет запланированный шаг: он сработает впустую.
+        let generation = pump_generation.get_untracked() + 1;
+        pump_generation.set(generation);
+
+        if !session.state.with(LocalGame::is_animating) {
+            return;
+        }
+        if delay == 0.0 {
+            session.dispatch(|game| {
+                while game.animation_step()? {}
+                // Ход доигран без показа кадров — финальную волну
+                // анимировать не нужно.
+                game.reset_animation();
+                Ok(())
+            });
+            return;
+        }
+        set_timeout(
+            move || {
+                if pump_generation.get_untracked() == generation {
+                    session.dispatch(|game| game.animation_step().map(|_| ()));
+                }
+            },
+            std::time::Duration::from_secs_f64(delay),
+        );
+    });
+
     view! {
         <div class="page game-page">
 
@@ -260,6 +297,10 @@ pub fn GamePage() -> impl IntoView {
                             let disabled = move || {
                                 let selected = mode.get();
                                 session.state.with(|game| {
+                                    // Клетки заблокированы, пока идёт анимация взрывов.
+                                    if game.is_animating() {
+                                        return true;
+                                    }
                                     // A starting Decrease just claims an empty
                                     // cell, so the usual checks do not apply.
                                     if selected == MoveMode::Decrease

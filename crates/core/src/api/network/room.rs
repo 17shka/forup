@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU8;
 
 use crate::api::game::board::{
-    Board, BoardCode, BotConfig, CharacterId, ExplosionMode, Game, GameAction, GameError, MemberId,
-    TeamId,
+    Board, BoardCode, BotConfig, CharacterId, ExplosionMode, Game, GameError, MemberId, TeamId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -478,8 +477,10 @@ impl Room {
             let Some(config) = self.bots.get(&member_id).copied() else {
                 break;
             };
-            let action = game.bot_action(member_id, &config);
-            game.apply_action(member_id, action)?;
+            let _ = match game.bot_move(member_id, &config) {
+                Some(pos) => game.increase(member_id, pos),
+                None => game.skip(member_id),
+            }?;
         }
         Ok(())
     }
@@ -738,11 +739,14 @@ impl Room {
         Ok(())
     }
 
-    pub fn apply_action(
+    /// Общая проверка хода живого участника: только владелец персонажа
+    /// может им играть. Сам ход выполняется на копии, боты доигрывают
+    /// свои ходы, и только тогда комната принимает новое состояние.
+    fn player_action(
         &mut self,
         actor: Uuid,
         member_id: CharacterId,
-        action: GameAction,
+        apply: impl FnOnce(&mut Game, CharacterId) -> Result<Option<TeamId>, GameError>,
     ) -> Result<Option<TeamId>, RoomError> {
         let controller = self
             .game
@@ -755,10 +759,44 @@ impl Room {
         }
 
         let mut game = self.game.clone();
-        let result = game.apply_action(member_id, action)?;
+        let result = apply(&mut game, member_id)?;
         self.run_bot_turns(&mut game)?;
         self.game = game;
         Ok(result)
+    }
+
+    pub fn increase(
+        &mut self,
+        actor: Uuid,
+        member_id: CharacterId,
+        pos: BoardCode,
+    ) -> Result<Option<TeamId>, RoomError> {
+        self.player_action(actor, member_id, |game, member| game.increase(member, pos))
+    }
+
+    pub fn decrease(
+        &mut self,
+        actor: Uuid,
+        member_id: CharacterId,
+        pos: BoardCode,
+    ) -> Result<Option<TeamId>, RoomError> {
+        self.player_action(actor, member_id, |game, member| game.decrease(member, pos))
+    }
+
+    pub fn skip(
+        &mut self,
+        actor: Uuid,
+        member_id: CharacterId,
+    ) -> Result<Option<TeamId>, RoomError> {
+        self.player_action(actor, member_id, Game::skip)
+    }
+
+    pub fn surrender(
+        &mut self,
+        actor: Uuid,
+        member_id: CharacterId,
+    ) -> Result<Option<TeamId>, RoomError> {
+        self.player_action(actor, member_id, Game::surrender)
     }
 
     /// Requires the actor to be an administrator (full rights).
@@ -951,7 +989,7 @@ mod tests {
         );
         assert_eq!(room.change_team(guest, guest_character, tid(3)), Ok(()));
         assert_eq!(
-            room.apply_action(guest, owner_character, GameAction::Skip),
+            room.skip(guest, owner_character),
             Err(RoomError::PermissionDenied)
         );
         room.set_game_rights(owner, GameRights::new(Rights::Nope, false, false))

@@ -61,19 +61,10 @@ pub enum MoveMode {
     Decrease,
 }
 
-impl MoveMode {
-    pub fn action(self, pos: BoardCode) -> GameAction {
-        match self {
-            Self::Increase => GameAction::Increase(pos),
-            Self::Decrease => GameAction::Decrease(pos),
-        }
-    }
-}
-
-/// A fully local match. Every action is replayed on this local replica first;
-/// only actions the local engine accepts are recorded in
-/// [`Self::validated_actions`], which is the payload an online client forwards
-/// to the server.
+/// Полностью локальная партия. Ход применяется в два приема: сначала
+/// [`Self::make_move`] применяет изменение клетки, затем волны взрывов
+/// доигрываются по одной через [`Self::animation_step`], чтобы UI
+/// анимировал их с настраиваемой скоростью.
 #[derive(Clone, Debug)]
 pub struct LocalGame {
     pub game: Game,
@@ -81,9 +72,12 @@ pub struct LocalGame {
     next_participant_id: ParticipantId,
     pub phase: GamePhase,
     pub winner: Option<TeamId>,
-    pub validated_actions: Vec<GameAction>,
     pub automatic_distribution: bool,
-    /// Net mass change of every board slot during the current action burst.
+    /// Ход доигрывается взрывами: ввод заблокирован до конца анимации.
+    exploding: bool,
+    /// Изменение значения каждой клетки за последний шаг хода (сам ход или
+    /// одна волна взрывов): анимируется только изменившаяся на этом шаге
+    /// клетка.
     changes: Vec<i16>,
     /// Alternating value used to restart CSS animations on repeated changes.
     pub animation_tick: u64,
@@ -99,8 +93,8 @@ impl LocalGame {
             next_participant_id: 1,
             phase: GamePhase::Lobby,
             winner: None,
-            validated_actions: Vec::new(),
             automatic_distribution: true,
+            exploding: false,
             changes,
             animation_tick: 0,
         };
@@ -561,7 +555,8 @@ impl LocalGame {
     }
 
     pub fn can_skip(&self) -> bool {
-        self.is_human_turn()
+        !self.exploding
+            && self.is_human_turn()
             && self
                 .current_character()
                 .is_some_and(|character| !self.game.is_starting_action(character))
@@ -578,7 +573,8 @@ impl LocalGame {
     }
 
     pub fn can_surrender(&self) -> bool {
-        self.is_human_turn()
+        !self.exploding
+            && self.is_human_turn()
             && self
                 .current_character()
                 .is_some_and(|character| !self.is_eliminated(character))
@@ -614,61 +610,90 @@ impl LocalGame {
         self.game.start(self.automatic_distribution)?;
         self.phase = GamePhase::Playing;
         self.winner = None;
-        self.validated_actions.clear();
+        self.exploding = false;
         self.reset_animation();
         Ok(())
     }
 
+    /// Ход живого участника: применяет изменение клетки и переходит в
+    /// режим пошаговой анимации взрывов (см. [`Self::animation_step`]).
+    /// Во время анимации новые ходы игнорируются.
     pub fn make_move(&mut self, pos: BoardCode, mode: MoveMode) -> Result<(), GameError> {
+        if self.exploding {
+            return Ok(());
+        }
         let character = self.require_human_turn()?;
-        self.submit(character, mode.action(pos))
+        let before = self.cell_values();
+        self.game
+            .start_move(character, pos, mode == MoveMode::Increase)?;
+        self.begin_animation_burst();
+        self.snapshot_deltas(&before);
+        self.exploding = true;
+        Ok(())
     }
 
     pub fn skip(&mut self) -> Result<(), GameError> {
+        if self.exploding {
+            return Ok(());
+        }
         let character = self.require_human_turn()?;
-        self.submit(character, GameAction::Skip)
+        let winner = self.game.skip(character)?;
+        self.settle(winner);
+        self.begin_bot_turn()?;
+        Ok(())
     }
 
     pub fn surrender(&mut self) -> Result<(), GameError> {
+        if self.exploding {
+            return Ok(());
+        }
         let character = self.require_human_turn()?;
-        self.submit(character, GameAction::Surrender)
+        let winner = self.game.surrender(character)?;
+        self.settle(winner);
+        self.begin_bot_turn()?;
+        Ok(())
     }
 
-    /// Validates and applies a human action, then immediately plays every
-    /// consecutive bot turn. There is no artificial delay: the resulting board
-    /// changes are animated by the UI through [`Self::change_at`].
-    ///
-    /// Online flow: call this locally, and only if it returns `Ok` forward the
-    /// recorded human action to the server, which re-validates it against the
-    /// authoritative game.
-    pub fn submit(&mut self, character: CharacterId, action: GameAction) -> Result<(), GameError> {
-        if self.phase != GamePhase::Playing {
-            return Err(GameError::GameNotStarted);
+    /// Доигрывает взрывы текущего хода на одну волну. Возвращает `true`,
+    /// пока анимация продолжается. Каждая волна обновляет `changes` и
+    /// `animation_tick`, поэтому клетки перерисовываются постепенно;
+    /// скорость задает только вызывающая сторона, движок ничего не ждет.
+    pub fn animation_step(&mut self) -> Result<bool, GameError> {
+        if self.phase != GamePhase::Playing || !self.exploding {
+            return Ok(false);
         }
 
-        self.begin_animation_burst();
-        self.apply_single(character, action)?;
-        self.validated_actions.push(action);
-
-        while self.phase == GamePhase::Playing && self.current_is_bot() {
-            let bot = self
-                .current_character()
-                .expect("a bot turn always has a current character");
-            let bot_action = self.game.bot_action(bot, &BotConfig::STANDARD);
-            self.apply_single(bot, bot_action)?;
+        let before = self.cell_values();
+        let more = self.game.explode_wave();
+        // Кадр волны: показать, даже если она оказалась последней
+        // (исход партии решен) и цепочка больше не продолжится.
+        // Бомбовая волна может не менять значений (урон зажат в ноль
+        // на минимуме), но тик всё равно растёт: он чередует CSS-классы,
+        // и клетка, меняющаяся в нескольких волнах, каждый раз
+        // перезапускает пульсацию заново.
+        if more || self.cell_values() != before {
+            self.animation_tick = self.animation_tick.wrapping_add(1);
+            self.snapshot_deltas(&before);
         }
-        Ok(())
+
+        if more {
+            return Ok(true);
+        }
+
+        self.exploding = false;
+        let winner = self.game.finish_move()?;
+        self.settle(winner);
+        self.begin_bot_turn()?;
+        Ok(self.exploding)
+    }
+
+    /// Ход доигрывается взрывами: ввод заблокирован до конца анимации.
+    pub fn is_animating(&self) -> bool {
+        self.exploding
     }
 
     pub fn reset(&mut self) {
         *self = Self::new();
-    }
-
-    /// Drains the locally validated human actions so a network layer can
-    /// forward them to the server. Nothing is removed before validation.
-    #[allow(dead_code)] // used by the future multiplayer transport
-    pub fn take_validated_actions(&mut self) -> Vec<GameAction> {
-        std::mem::take(&mut self.validated_actions)
     }
 
     // --- board / team view helpers ---------------------------------------
@@ -843,7 +868,7 @@ impl LocalGame {
         self.game.reset_stats();
         self.phase = GamePhase::Lobby;
         self.winner = None;
-        self.validated_actions.clear();
+        self.exploding = false;
         self.reset_animation();
     }
 
@@ -854,42 +879,42 @@ impl LocalGame {
         self.changes.resize(len, 0);
     }
 
-    fn reset_animation(&mut self) {
+    /// Сбрасывает кадры анимации: без дельт клетки не анимируются.
+    /// Используется и мгновенным режимом (задержка 0) после доигрывания
+    /// хода целиком: кадры не показывались — воспроизводить их не нужно.
+    pub fn reset_animation(&mut self) {
         self.changes.clear();
         self.changes.resize(self.game.board().cells().len(), 0);
         self.animation_tick = 0;
     }
 
-    fn apply_single(
-        &mut self,
-        character: CharacterId,
-        action: GameAction,
-    ) -> Result<(), GameError> {
-        let before: Vec<i16> = self
-            .game
-            .board()
-            .cells()
-            .iter()
-            .map(|cell| i16::from(cell.value))
-            .collect();
-
-        let mut next = self.game.clone();
-        let winner = next.apply_action(character, action)?;
-        self.game = next;
-
-        for (index, cell) in self.game.board().cells().iter().enumerate() {
-            let Some(previous) = before.get(index) else {
-                continue;
-            };
-            let delta = i16::from(cell.value) - *previous;
-            if delta == 0 {
-                continue;
-            }
-            if let Some(slot) = self.changes.get_mut(index) {
-                *slot = slot.saturating_add(delta);
+    /// Проигрывает ходы ботов подряд, пока очередь не вернется к человеку.
+    /// Ход со взрывами переводит бота в режим анимации, как и человека.
+    fn begin_bot_turn(&mut self) -> Result<(), GameError> {
+        while self.phase == GamePhase::Playing && !self.exploding && self.current_is_bot() {
+            let bot = self
+                .current_character()
+                .expect("a bot turn always has a current character");
+            match self.game.bot_move(bot, &BotConfig::STANDARD) {
+                Some(pos) => {
+                    let before = self.cell_values();
+                    self.game.start_move(bot, pos, true)?;
+                    self.begin_animation_burst();
+                    self.snapshot_deltas(&before);
+                    self.exploding = true;
+                }
+                None => {
+                    let winner = self.game.skip(bot)?;
+                    self.settle(winner);
+                }
             }
         }
+        Ok(())
+    }
 
+    /// Фиксирует результат завершившегося хода: победителя или конец
+    /// партии.
+    fn settle(&mut self, winner: Option<TeamId>) {
         if let Some(team) = winner {
             self.finish(team);
         } else if !self.game.is_started() {
@@ -897,7 +922,29 @@ impl LocalGame {
             self.phase = GamePhase::Finished;
             self.winner = team;
         }
-        Ok(())
+    }
+
+    fn cell_values(&self) -> Vec<i16> {
+        self.game
+            .board()
+            .cells()
+            .iter()
+            .map(|cell| i16::from(cell.value))
+            .collect()
+    }
+
+    /// Записывает в `changes` изменение значений за последний шаг. Значения
+    /// заменяются, а не суммируются за ход: клетка анимируется только в той
+    /// волне, где изменилась, — уже взорвавшаяся клетка не пульсирует дальше.
+    fn snapshot_deltas(&mut self, before: &[i16]) {
+        for (index, cell) in self.game.board().cells().iter().enumerate() {
+            let Some(previous) = before.get(index) else {
+                continue;
+            };
+            if let Some(slot) = self.changes.get_mut(index) {
+                *slot = i16::from(cell.value) - *previous;
+            }
+        }
     }
 
     fn finish(&mut self, team: TeamId) {
@@ -1034,21 +1081,25 @@ mod tests {
         let game = started();
         assert_eq!(game.phase, GamePhase::Playing);
         assert!(game.is_human_turn());
-        assert!(game.validated_actions.is_empty());
+        assert!(!game.is_animating());
         assert_eq!(game.animation_tick, 0);
     }
 
     #[test]
-    fn human_move_is_validated_and_the_bot_answers_immediately() {
+    fn human_move_plays_explosions_wave_by_wave_and_the_bot_answers() {
         let mut game = started();
         let pos = current_human_cell(&game);
 
         game.make_move(pos, MoveMode::Increase).unwrap();
 
-        // Only the human action is forwarded; the bot is a local prediction.
-        assert_eq!(game.validated_actions, vec![GameAction::Increase(pos)]);
+        // The change is applied immediately and the burst starts animating.
+        assert!(game.is_animating());
         assert_eq!(game.animation_tick, 1);
         assert!(game.changes.iter().any(|delta| *delta != 0));
+
+        // Waves play one per step, then the turn settles and the bot answers.
+        while game.animation_step().unwrap() {}
+        assert!(!game.is_animating());
         assert!(game.phase == GamePhase::Finished || game.is_human_turn());
     }
 
@@ -1072,7 +1123,8 @@ mod tests {
         assert!(game.make_move(pos, MoveMode::Increase).is_err());
 
         assert_eq!(game.game, before);
-        assert!(game.validated_actions.is_empty());
+        assert!(!game.is_animating());
+        assert_eq!(game.animation_tick, 0);
     }
 
     #[test]

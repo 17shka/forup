@@ -12,7 +12,7 @@ use crate::api::network::Uuid; // NonZeroU32
 pub mod prelude {
     pub use super::{
         Board, BoardCode, BotConfig, CellAbility, CellData, CharacterData, CharacterId,
-        ExplosionMode, Game, GameAction, GameError, MemberId, MemberStat, Score, TeamId,
+        ExplosionMode, Game, GameError, MemberId, MemberStat, Score, TeamId,
     };
 }
 
@@ -333,18 +333,16 @@ mod game_rule_tests {
         assert_eq!(safe_radius, 8);
         game.start(false).unwrap();
 
-        game.apply_action(cid(1), GameAction::Increase(pos(0)))
-            .unwrap();
+        game.increase(cid(1), pos(0)).unwrap();
         let near = game.board.position(2, 2).unwrap();
         let far = game.board.position(3, 3).unwrap();
         assert!(!game.can_start_at(near));
         assert_eq!(
-            game.apply_action(cid(2), GameAction::Increase(near)),
+            game.increase(cid(2), near),
             Err(GameError::StartCellTooClose)
         );
         assert!(game.can_start_at(far));
-        game.apply_action(cid(2), GameAction::Increase(far))
-            .unwrap();
+        game.increase(cid(2), far).unwrap();
     }
 
     #[test]
@@ -355,8 +353,7 @@ mod game_rule_tests {
         game.start(false).unwrap();
 
         // Уменьшение числится как ход, но клетка остаётся нулевой.
-        game.apply_action(cid(1), GameAction::Decrease(pos(0)))
-            .unwrap();
+        game.decrease(cid(1), pos(0)).unwrap();
         let cell = game.board[pos(0)];
         assert_eq!(cell.owner, Some(tid(1)));
         assert_eq!(cell.value, 0);
@@ -365,10 +362,9 @@ mod game_rule_tests {
 
         // Команда уже владеет клеткой нулевого значения — обычное уменьшение
         // требует запас до минимального значения и отклоняется.
-        game.apply_action(cid(2), GameAction::Increase(pos(35)))
-            .unwrap();
+        game.increase(cid(2), pos(35)).unwrap();
         assert_eq!(
-            game.apply_action(cid(1), GameAction::Decrease(pos(0))),
+            game.decrease(cid(1), pos(0)),
             Err(GameError::CellCannotBeDecreased)
         );
     }
@@ -413,7 +409,7 @@ mod game_rule_tests {
         game.add_local_member(uid(3), tid(3)).unwrap();
         game.start(false).unwrap();
 
-        game.apply_action(cid(1), GameAction::Surrender).unwrap();
+        game.surrender(cid(1)).unwrap();
 
         assert_eq!(game.characters[&cid(1)].stats.losses, 1);
         assert_eq!(game.current_turn, Some(1));
@@ -452,9 +448,7 @@ mod game_rule_tests {
             ..CellData::default()
         };
 
-        let winner = game
-            .apply_action(cid(1), GameAction::Increase(pos(0)))
-            .unwrap();
+        let winner = game.increase(cid(1), pos(0)).unwrap();
 
         assert_eq!(winner, Some(tid(1)));
         assert_eq!(game.board[pos(3)].value, 4);
@@ -473,11 +467,9 @@ mod game_rule_tests {
             owner: Some(tid(1)),
             ..CellData::default()
         };
-        let mut blasts = Vec::new();
-
         // The corner cell becomes 4, explodes and has only two of its four
         // cardinal targets on the board.
-        board.apply_move(pos(0), tid(1), 1, &mut blasts, ExplosionMode::Lossless);
+        board.apply_move(pos(0), tid(1), 1, ExplosionMode::Lossless);
 
         assert_eq!(board[pos(0)].value, 2);
         assert_eq!(board[pos(1)].value, 1);
@@ -493,9 +485,7 @@ mod game_rule_tests {
             owner: Some(tid(1)),
             ..CellData::default()
         };
-        let mut blasts = Vec::new();
-
-        board.apply_move(pos(0), tid(1), 1, &mut blasts, ExplosionMode::Lossy);
+        board.apply_move(pos(0), tid(1), 1, ExplosionMode::Lossy);
 
         assert_eq!(board[pos(0)].value, 0);
         assert_eq!(board[pos(1)].value, 1);
@@ -518,8 +508,7 @@ mod game_rule_tests {
             .expect("team 1 starts with a cell");
 
         // The first decrease takes the cell from 1 to 0 and advances the turn.
-        game.apply_action(cid(1), GameAction::Decrease(pos))
-            .unwrap();
+        game.decrease(cid(1), pos).unwrap();
         assert_eq!(game.board[pos].value, 0);
 
         // Put the same member back on turn and try to decrease the empty cell
@@ -528,7 +517,7 @@ mod game_rule_tests {
         let before = game.current_turn;
 
         assert_eq!(
-            game.apply_action(cid(1), GameAction::Decrease(pos)),
+            game.decrease(cid(1), pos),
             Err(GameError::CellCannotBeDecreased)
         );
         assert_eq!(game.current_turn, before);
@@ -554,14 +543,6 @@ pub enum GameError {
     BotIdSpaceExhausted,
     /// Стартовая клетка ближе к занятой клетке, чем разрешает [`Game::safe_radius`].
     StartCellTooClose,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GameAction {
-    Increase(BoardCode),
-    Decrease(BoardCode),
-    Skip,
-    Surrender,
 }
 
 /// Партия целиком: участники, доска и правила. Поля закрыты — доступ
@@ -791,7 +772,7 @@ impl Game {
 
     pub fn leave(&mut self, member_id: CharacterId) {
         if self.is_started() {
-            let _ = self.apply_action(member_id, GameAction::Surrender);
+            let _ = self.surrender(member_id);
             return;
         }
 
@@ -955,18 +936,31 @@ impl Game {
         Ok(team_id)
     }
 
-    pub fn skip(&mut self, member_id: CharacterId) -> Result<(), GameError> {
+    /// Пропуск хода. Первый ход пропустить нельзя — нужно занять клетку.
+    /// Возвращает победителя, если партия этим ходом завершилась.
+    pub fn skip(&mut self, member_id: CharacterId) -> Result<Option<TeamId>, GameError> {
+        if !self.is_started() {
+            return Err(GameError::GameNotStarted);
+        }
+        if self.is_starting_action(member_id) {
+            return Err(GameError::FirstMoveRequiresEmptyCell);
+        }
         self.check_turn(member_id)?;
         let character = self.characters.get_mut(&member_id).unwrap();
         character.stats.skipped_moves = character.stats.skipped_moves.saturating_add(1);
         self.advance_turn();
-        Ok(())
+        self.outcome()
     }
 
-    pub fn surrender(&mut self, member_id: CharacterId) -> Result<(), GameError> {
+    /// Сдача: участник получает поражение, партия продолжается, пока
+    /// остаются другие команды.
+    pub fn surrender(&mut self, member_id: CharacterId) -> Result<Option<TeamId>, GameError> {
+        if !self.is_started() {
+            return Err(GameError::GameNotStarted);
+        }
         self.active_team(member_id)?;
         self.eliminate(member_id);
-        Ok(())
+        self.outcome()
     }
 
     pub fn is_starting_action(&self, member_id: CharacterId) -> bool {
@@ -975,23 +969,50 @@ impl Game {
         })
     }
 
-    pub fn make_move(
+    /// Ход-увеличение клетки: применяется изменение и доигрывается вся
+    /// цепочка взрывов. Возвращает победителя, если партия завершилась.
+    pub fn increase(
+        &mut self,
+        member_id: CharacterId,
+        pos: BoardCode,
+    ) -> Result<Option<TeamId>, GameError> {
+        self.play_move(member_id, pos, true)
+    }
+
+    /// Ход-уменьшение клетки: применяется изменение и доигрывается вся
+    /// цепочка взрывов.
+    pub fn decrease(
+        &mut self,
+        member_id: CharacterId,
+        pos: BoardCode,
+    ) -> Result<Option<TeamId>, GameError> {
+        self.play_move(member_id, pos, false)
+    }
+
+    fn play_move(
+        &mut self,
+        member_id: CharacterId,
+        pos: BoardCode,
+        increase: bool,
+    ) -> Result<Option<TeamId>, GameError> {
+        if !self.is_started() {
+            return Err(GameError::GameNotStarted);
+        }
+        self.start_move(member_id, pos, increase)?;
+        self.explode_all();
+        self.finish_move()
+    }
+
+    /// Начало хода: применяет изменение клетки без доигрывания взрывов.
+    /// Все проверки проходят до каких-либо изменений состояния. Дальше
+    /// волны взрывов доигрываются по одной через [`Self::explode_wave`],
+    /// после последней ход завершается [`Self::finish_move`].
+    pub fn start_move(
         &mut self,
         member_id: CharacterId,
         pos: BoardCode,
         increase: bool,
     ) -> Result<(), GameError> {
-        self.make_move_with_result(member_id, pos, increase, &mut |_| {})
-            .map(|_| ())
-    }
-
-    fn make_move_with_result(
-        &mut self,
-        member_id: CharacterId,
-        pos: BoardCode,
-        increase: bool,
-        on_step: &mut dyn FnMut(&Board),
-    ) -> Result<Option<TeamId>, GameError> {
         let team = self.check_turn(member_id)?;
         if !self.board.contains(pos) {
             return Err(GameError::PositionOutOfBounds);
@@ -1034,19 +1055,32 @@ impl Game {
         } else {
             -1
         };
-        let mut blasts = Vec::new();
-        self.board.apply_move_until(
-            pos,
-            team,
-            delta,
-            &mut blasts,
-            self.explosion_mode,
-            on_step,
-            |board| {
-                Self::sole_surviving_team(board, &self.characters).is_some() || board.is_saturated()
-            },
-        );
+        self.board.apply_delta(pos, team, delta);
+        Ok(())
+    }
 
+    /// Доигрывает одну волну взрывов. Возвращает `true`, если волна
+    /// применилась и цепочку стоит продолжать; `false` — взрывов больше
+    /// нет либо исход партии решён, и ход пора завершать через
+    /// [`Self::finish_move`]. При раннем выходе отметки `activated`
+    /// сохраняются, поэтому прерванная цепочка доигрывается позже.
+    pub fn explode_wave(&mut self) -> bool {
+        if !self.board.explode_activated(self.explosion_mode) {
+            return false;
+        }
+        Self::sole_surviving_team(&self.board, &self.characters).is_none()
+            && !self.board.is_saturated()
+    }
+
+    /// Доигрывает все волны взрывов без пошаговой анимации.
+    fn explode_all(&mut self) {
+        while self.explode_wave() {}
+    }
+
+    /// Завершает ход после изменения и взрывов: возвращает победителя,
+    /// если партия решилась, иначе передаёт ход дальше. Насыщенная доска
+    /// ход не передаёт — исход решается по массе.
+    pub fn finish_move(&mut self) -> Result<Option<TeamId>, GameError> {
         if let Some(winner) = Self::sole_surviving_team(&self.board, &self.characters) {
             self.eliminate_teams_without_cells();
             self.current_turn = None;
@@ -1054,62 +1088,15 @@ impl Game {
             return Ok(Some(winner));
         }
         if self.board.is_saturated() {
-            return Ok(None);
+            return self.outcome();
         }
-
         self.advance_turn();
-        Ok(None)
+        self.outcome()
     }
 
-    pub fn apply_action(
-        &mut self,
-        member_id: CharacterId,
-        action: GameAction,
-    ) -> Result<Option<TeamId>, GameError> {
-        self.apply_action_with_steps(member_id, action, |_| {})
-    }
-
-    /// Same as [`Self::apply_action`], but reports the board after the initial
-    /// change and after every explosion wave so the UI can replay it step by
-    /// step.
-    pub fn apply_action_with_steps(
-        &mut self,
-        member_id: CharacterId,
-        action: GameAction,
-        mut on_step: impl FnMut(&Board),
-    ) -> Result<Option<TeamId>, GameError> {
-        if !self.is_started() {
-            return Err(GameError::GameNotStarted);
-        }
-        if self.is_starting_action(member_id)
-            && !matches!(
-                action,
-                GameAction::Increase(_) | GameAction::Decrease(_) | GameAction::Surrender
-            )
-        {
-            return Err(GameError::FirstMoveRequiresEmptyCell);
-        }
-
-        let move_winner = match action {
-            GameAction::Increase(pos) => {
-                self.make_move_with_result(member_id, pos, true, &mut on_step)?
-            }
-            GameAction::Decrease(pos) => {
-                self.make_move_with_result(member_id, pos, false, &mut on_step)?
-            }
-            GameAction::Skip => {
-                self.skip(member_id)?;
-                None
-            }
-            GameAction::Surrender => {
-                self.surrender(member_id)?;
-                None
-            }
-        };
-
-        if move_winner.is_some() {
-            return Ok(move_winner);
-        }
+    /// Общий итог хода: одна из проверок в его процессе могла завершить
+    /// партию.
+    fn outcome(&mut self) -> Result<Option<TeamId>, GameError> {
         if !self.is_started() {
             return Ok(None);
         }
@@ -1248,7 +1235,6 @@ impl Game {
 
         let mut scratch = Board::default();
         scratch.clone_from(&self.board);
-        let mut blasts = Vec::new();
 
         let has_cells = self.board.owns_cells(team);
 
@@ -1269,7 +1255,7 @@ impl Game {
             .into_iter()
             .map(|pos| {
                 scratch.clone_from(&self.board);
-                let steps = scratch.apply_move(pos, team, 1, &mut blasts, self.explosion_mode);
+                let steps = scratch.apply_move(pos, team, 1, self.explosion_mode);
                 let chain = (steps.saturating_sub(1) as Score) * cfg.chain_bonus;
                 let mut score = scratch.evaluate(team, cfg) + chain;
 
@@ -1290,8 +1276,10 @@ impl Game {
             .collect()
     }
 
-    pub fn bot_action(&self, member_id: CharacterId, cfg: &BotConfig) -> GameAction {
-        cfg.pick_best_action(&self.move_weights(member_id, cfg))
+    /// Ход бота: лучшая клетка по весам или `None` — легальных ходов нет
+    /// и бот пропускает ход.
+    pub fn bot_move(&self, member_id: CharacterId, cfg: &BotConfig) -> Option<BoardCode> {
+        BotConfig::best_position(&self.move_weights(member_id, cfg))
     }
 
     fn legal_cells(&self, team: TeamId) -> Vec<BoardCode> {
@@ -1324,11 +1312,13 @@ impl BotConfig {
         chain_bonus: 2,
     };
 
-    pub fn pick_best_action(&self, weights: &[(BoardCode, Score)]) -> GameAction {
+    /// Лучший ход по весам: наибольший счёт, при равенстве — клетка с
+    /// меньшим кодом. `None` — легальных ходов нет.
+    pub fn best_position(weights: &[(BoardCode, Score)]) -> Option<BoardCode> {
         weights
             .iter()
             .max_by_key(|&&(pos, score)| (score, Reverse(pos.slot())))
-            .map_or(GameAction::Skip, |&(pos, _)| GameAction::Increase(pos))
+            .map(|&(pos, _)| pos)
     }
 }
 
@@ -1479,43 +1469,21 @@ impl Board {
         self.cells.fill(CellData::default());
     }
 
-    fn apply_move(
-        &mut self,
-        pos: BoardCode,
-        team: TeamId,
-        delta: i8,
-        blasts: &mut Vec<Blast>,
-        mode: ExplosionMode,
-    ) -> u32 {
-        self.apply_move_until(pos, team, delta, blasts, mode, &mut |_| {}, |_| false)
-    }
-
-    fn apply_move_until<F>(
-        &mut self,
-        pos: BoardCode,
-        team: TeamId,
-        delta: i8,
-        blasts: &mut Vec<Blast>,
-        mode: ExplosionMode,
-        on_step: &mut dyn FnMut(&Board),
-        mut stop_after_wave: F,
-    ) -> u32
-    where
-        F: FnMut(&Board) -> bool,
-    {
+    /// Применяет изменение клетки: значение, владелец и отметка взрыва.
+    fn apply_delta(&mut self, pos: BoardCode, team: TeamId, delta: i8) {
         let cell = &mut self[pos];
         cell.value = cell.value.saturating_add(delta).max(0);
         cell.owner = Some(team);
         cell.activated = true;
-        on_step(self);
+    }
 
+    /// Доигрывает ход целиком (оценка ботов): изменение плюс все волны
+    /// взрывов. Возвращает количество волн.
+    fn apply_move(&mut self, pos: BoardCode, team: TeamId, delta: i8, mode: ExplosionMode) -> u32 {
+        self.apply_delta(pos, team, delta);
         let mut waves = 0;
-        while self.explode_activated(blasts, mode) {
+        while self.explode_activated(mode) {
             waves += 1;
-            on_step(self);
-            if stop_after_wave(self) {
-                break;
-            }
         }
         waves
     }
@@ -1526,8 +1494,8 @@ impl Board {
     /// цепочка считается завершённой. Ранний выход (например, победа одной
     /// команды) оставляет отметки — так состояние цепочки переживает
     /// сохранение и продолжится на следующем ходу.
-    fn explode_activated(&mut self, blasts: &mut Vec<Blast>, mode: ExplosionMode) -> bool {
-        blasts.clear();
+    fn explode_activated(&mut self, mode: ExplosionMode) -> bool {
+        let mut blasts = Vec::new();
 
         for (slot, &cell) in self.cells.iter().enumerate() {
             if cell.activated && cell.can_explode() {
