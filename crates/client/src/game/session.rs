@@ -92,7 +92,7 @@ pub struct LocalGame {
 impl LocalGame {
     pub fn new() -> Self {
         let game = Game::standard();
-        let changes = vec![0; game.board.cells().len()];
+        let changes = vec![0; game.board().cells().len()];
         let mut local = Self {
             game,
             participants: Vec::new(),
@@ -206,7 +206,12 @@ impl LocalGame {
             let team = participant
                 .characters
                 .iter()
-                .find_map(|character| self.game.characters.get(character).map(|data| data.team_id))
+                .find_map(|character| {
+                    self.game
+                        .characters()
+                        .get(character)
+                        .map(|data| data.team_id)
+                })
                 .unwrap_or_else(|| self.next_team_id());
             (participant.controller, team)
         };
@@ -308,9 +313,7 @@ impl LocalGame {
 
         let characters = self.participants[index].characters.clone();
         for character in characters {
-            if let Some(data) = self.game.characters.get_mut(&character) {
-                data.controller = member;
-            }
+            self.game.set_controller(character, member)?;
         }
 
         self.participants[index].controller = controller;
@@ -343,10 +346,12 @@ impl LocalGame {
             .participants
             .iter()
             .find(|participant| participant.id == participant_id)?;
-        participant
-            .characters
-            .iter()
-            .find_map(|character| self.game.characters.get(character).map(|data| data.team_id))
+        participant.characters.iter().find_map(|character| {
+            self.game
+                .characters()
+                .get(character)
+                .map(|data| data.team_id)
+        })
     }
 
     pub fn participant_stats(&self, participant_id: ParticipantId) -> (u16, u16, u16) {
@@ -362,7 +367,7 @@ impl LocalGame {
         let mut losses = 0u16;
         let mut moves = 0u16;
         for character in &participant.characters {
-            if let Some(data) = self.game.characters.get(character) {
+            if let Some(data) = self.game.characters().get(character) {
                 let stat = data.stats;
                 wins = wins.saturating_add(u16::from(stat.wins));
                 losses = losses.saturating_add(u16::from(stat.losses));
@@ -401,7 +406,7 @@ impl LocalGame {
     // --- match settings ---------------------------------------------------
 
     pub fn board_size(&self) -> BoardCode {
-        self.game.board.size()
+        self.game.board().size()
     }
 
     /// Resizes the board. Only allowed outside a running match.
@@ -410,7 +415,7 @@ impl LocalGame {
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted);
         }
-        self.game.board.set_size(size);
+        self.game.set_board_size(size)?;
         self.reset_animation();
         Ok(())
     }
@@ -427,17 +432,19 @@ impl LocalGame {
     }
 
     pub fn lossless_explosions(&self) -> bool {
-        self.game.explosion_mode == ExplosionMode::Lossless
+        self.game.explosion_mode() == ExplosionMode::Lossless
     }
 
     pub fn set_lossless_explosions(&mut self, value: bool) {
         self.enter_edit_mode();
         if !self.game.is_started() {
-            self.game.explosion_mode = if value {
+            let mode = if value {
                 ExplosionMode::Lossless
             } else {
                 ExplosionMode::Lossy
             };
+            // Игра ещё не началась, поэтому смена режима не может провалиться.
+            let _ = self.game.set_explosion_mode(mode);
         }
     }
 
@@ -468,14 +475,14 @@ impl LocalGame {
 
     pub fn current_character(&self) -> Option<CharacterId> {
         self.game
-            .current_turn
-            .and_then(|index| self.game.characters.get_index(index).map(|(id, _)| *id))
+            .current_turn()
+            .and_then(|index| self.game.characters().get_index(index).map(|(id, _)| *id))
     }
 
     pub fn current_is_bot(&self) -> bool {
         self.current_character().is_some_and(|character| {
             self.game
-                .characters
+                .characters()
                 .get(&character)
                 .is_some_and(|data| data.controller == MemberId::Bot)
         })
@@ -489,7 +496,7 @@ impl LocalGame {
 
     pub fn current_team(&self) -> Option<TeamId> {
         self.current_character()
-            .and_then(|character| self.game.characters.get(&character))
+            .and_then(|character| self.game.characters().get(&character))
             .map(|data| data.team_id)
     }
 
@@ -520,15 +527,15 @@ impl LocalGame {
     /// The next distinct participant in turn order, skipping eliminated seats.
     pub fn next_participant_id(&self) -> Option<ParticipantId> {
         let current = self.current_participant_id()?;
-        let start = self.game.current_turn?;
-        let len = self.game.characters.len();
+        let start = self.game.current_turn()?;
+        let len = self.game.characters().len();
         if len == 0 {
             return None;
         }
         (1..=len).find_map(|step| {
             let character = self
                 .game
-                .characters
+                .characters()
                 .get_index((start + step) % len)
                 .map(|(id, _)| *id)?;
             if self.is_eliminated(character) {
@@ -541,7 +548,7 @@ impl LocalGame {
 
     pub fn can_start(&self) -> bool {
         self.phase != GamePhase::Playing
-            && self.game.characters.len() >= 2
+            && self.game.characters().len() >= 2
             && self.teams().len() >= 2
             && self
                 .participants
@@ -564,7 +571,7 @@ impl LocalGame {
         self.can_skip()
             && self.current_team().is_some_and(|team| {
                 self.game
-                    .board
+                    .board()
                     .iter()
                     .any(|(_, cell)| cell.owner == Some(team) && cell.value > 0)
             })
@@ -579,13 +586,13 @@ impl LocalGame {
 
     /// A legal target for the current human seat's next action.
     pub fn can_move_to(&self, pos: BoardCode) -> bool {
-        if !self.is_human_turn() || !self.game.board.contains(pos) {
+        if !self.is_human_turn() || !self.game.board().contains(pos) {
             return false;
         }
         let (Some(character), Some(team), Some(cell)) = (
             self.current_character(),
             self.current_team(),
-            self.game.board.get(pos),
+            self.game.board().get(pos),
         ) else {
             return false;
         };
@@ -668,7 +675,7 @@ impl LocalGame {
 
     pub fn teams(&self) -> Vec<TeamId> {
         self.game
-            .characters
+            .characters()
             .values()
             .map(|character| character.team_id)
             .collect::<BTreeSet<_>>()
@@ -693,7 +700,7 @@ impl LocalGame {
     pub fn team_options(&self) -> Vec<TeamId> {
         let mut numbers: BTreeSet<u8> = self
             .game
-            .characters
+            .characters()
             .values()
             .map(|character| character.team_id.get())
             .collect();
@@ -715,7 +722,7 @@ impl LocalGame {
                     .iter()
                     .filter_map(|character| {
                         self.game
-                            .characters
+                            .characters()
                             .get(character)
                             .map(|data| CharacterView {
                                 id: *character,
@@ -743,7 +750,7 @@ impl LocalGame {
                             .copied()
                             .filter(|character| {
                                 self.game
-                                    .characters
+                                    .characters()
                                     .get(character)
                                     .is_some_and(|data| data.team_id == team)
                             })
@@ -756,7 +763,7 @@ impl LocalGame {
                         let mut losses = 0u16;
                         let mut moves = 0u16;
                         for character in &characters {
-                            if let Some(data) = self.game.characters.get(character) {
+                            if let Some(data) = self.game.characters().get(character) {
                                 let stat = data.stats;
                                 wins = wins.saturating_add(u16::from(stat.wins));
                                 losses = losses.saturating_add(u16::from(stat.losses));
@@ -807,7 +814,7 @@ impl LocalGame {
 
     fn is_eliminated(&self, character: CharacterId) -> bool {
         self.game
-            .characters
+            .characters()
             .get(&character)
             .map(|c| c.stats.losses > 0)
             .unwrap_or(false)
@@ -816,7 +823,7 @@ impl LocalGame {
     fn next_team_id(&self) -> TeamId {
         let used: BTreeSet<u8> = self
             .game
-            .characters
+            .characters()
             .values()
             .map(|character| character.team_id.get())
             .collect();
@@ -833,9 +840,7 @@ impl LocalGame {
             return;
         }
         self.game.stop();
-        for character in self.game.characters.values_mut() {
-            character.stats = MemberStat::default();
-        }
+        self.game.reset_stats();
         self.phase = GamePhase::Lobby;
         self.winner = None;
         self.validated_actions.clear();
@@ -844,14 +849,14 @@ impl LocalGame {
 
     fn begin_animation_burst(&mut self) {
         self.animation_tick = self.animation_tick.wrapping_add(1);
-        let len = self.game.board.cells().len();
+        let len = self.game.board().cells().len();
         self.changes.clear();
         self.changes.resize(len, 0);
     }
 
     fn reset_animation(&mut self) {
         self.changes.clear();
-        self.changes.resize(self.game.board.cells().len(), 0);
+        self.changes.resize(self.game.board().cells().len(), 0);
         self.animation_tick = 0;
     }
 
@@ -862,7 +867,7 @@ impl LocalGame {
     ) -> Result<(), GameError> {
         let before: Vec<i16> = self
             .game
-            .board
+            .board()
             .cells()
             .iter()
             .map(|cell| i16::from(cell.value))
@@ -872,7 +877,7 @@ impl LocalGame {
         let winner = next.apply_action(character, action)?;
         self.game = next;
 
-        for (index, cell) in self.game.board.cells().iter().enumerate() {
+        for (index, cell) in self.game.board().cells().iter().enumerate() {
             let Some(previous) = before.get(index) else {
                 continue;
             };
@@ -902,7 +907,7 @@ impl LocalGame {
 
     fn winner_from_stats(&self) -> Option<TeamId> {
         self.game
-            .characters
+            .characters()
             .iter()
             .find_map(|(&_character, data)| (data.stats.wins > 0).then_some(data.team_id))
     }
@@ -915,16 +920,18 @@ impl Default for LocalGame {
 }
 
 pub fn team_totals(game: &Game, team: TeamId) -> (u16, i32) {
-    game.board.iter().fold((0, 0), |(cells, mass), (_, cell)| {
-        if cell.owner == Some(team) {
-            (
-                cells.saturating_add(1),
-                mass.saturating_add(i32::from(cell.value)),
-            )
-        } else {
-            (cells, mass)
-        }
-    })
+    game.board()
+        .iter()
+        .fold((0, 0), |(cells, mass), (_, cell)| {
+            if cell.owner == Some(team) {
+                (
+                    cells.saturating_add(1),
+                    mass.saturating_add(i32::from(cell.value)),
+                )
+            } else {
+                (cells, mass)
+            }
+        })
 }
 
 #[allow(dead_code)]
@@ -1015,7 +1022,7 @@ mod tests {
     fn current_human_cell(game: &LocalGame) -> BoardCode {
         let team = game.current_team().expect("a human team owns the turn");
         game.game
-            .board
+            .board()
             .iter()
             .find(|(_, cell)| cell.owner == Some(team))
             .map(|(pos, _)| pos)
@@ -1056,7 +1063,7 @@ mod tests {
             .expect("the default match has two teams");
         let pos = game
             .game
-            .board
+            .board()
             .iter()
             .find(|(_, cell)| cell.owner == Some(bot_team))
             .map(|(pos, _)| pos)
@@ -1101,7 +1108,7 @@ mod tests {
 
         assert_eq!(
             game.game
-                .characters
+                .characters()
                 .get(&character)
                 .map(|data| data.team_id),
             Some(team)
@@ -1147,7 +1154,12 @@ mod tests {
         game.ready().unwrap();
 
         assert!(!game.automatic_distribution());
-        assert!(game.game.board.iter().all(|(_, cell)| cell.owner.is_none()));
+        assert!(
+            game.game
+                .board()
+                .iter()
+                .all(|(_, cell)| cell.owner.is_none())
+        );
     }
 
     fn tid(id: u8) -> TeamId {
@@ -1212,7 +1224,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             game.game
-                .characters
+                .characters()
                 .get(&character)
                 .map(|data| data.controller),
             Some(MemberId::Bot)
@@ -1222,7 +1234,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             game.game
-                .characters
+                .characters()
                 .get(&character)
                 .map(|data| data.controller),
             Some(MemberId::Player(_))

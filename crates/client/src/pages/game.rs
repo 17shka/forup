@@ -36,7 +36,7 @@ fn cell_animation_class(tick: u64, growing: bool) -> &'static str {
 
 fn cell_class(state: &LocalGame, pos: BoardCode) -> String {
     let mut class = String::from("board-cell");
-    if let Some(cell) = state.game.board.get(pos) {
+    if let Some(cell) = state.game.board().get(pos) {
         if cell.owner.is_some() {
             class.push_str(" board-cell--owned");
             if cell.can_explode() {
@@ -58,7 +58,7 @@ fn cell_class(state: &LocalGame, pos: BoardCode) -> String {
 /// The cell colour is the team hue; only its brightness changes with the
 /// value (5% per point, so `4` is 20% lighter and `-2` is 10% darker).
 fn cell_style(state: &LocalGame, pos: BoardCode) -> String {
-    let Some(cell) = state.game.board.get(pos) else {
+    let Some(cell) = state.game.board().get(pos) else {
         return String::new();
     };
     let Some(owner) = cell.owner else {
@@ -72,7 +72,7 @@ fn cell_style(state: &LocalGame, pos: BoardCode) -> String {
 fn cell_value(state: &LocalGame, pos: BoardCode) -> String {
     state
         .game
-        .board
+        .board()
         .get(pos)
         .filter(|cell| cell.value > 0)
         .map(|cell| cell.value.to_string())
@@ -270,7 +270,7 @@ pub fn GamePage() -> impl IntoView {
                                     let empty_decrease = selected == MoveMode::Decrease
                                         && game
                                             .game
-                                            .board
+                                            .board()
                                             .get(pos)
                                             .is_some_and(|cell| cell.value <= 0);
                                     !game.can_move_to(pos)

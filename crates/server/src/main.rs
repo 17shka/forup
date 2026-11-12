@@ -19,9 +19,7 @@ use client::app::{App, shell};
 #[cfg(feature = "ssr")]
 use forup_core::api::auth::UserStore;
 #[cfg(feature = "ssr")]
-use forup_core::api::game::storage::GameStore;
-#[cfg(feature = "ssr")]
-use forup_core::api::network::{RoomDirectory, RoomMode, Uuid, UuidExt};
+use forup_core::api::network::{RoomDirectory, RoomMode, RoomStore, Uuid, UuidExt};
 #[cfg(feature = "ssr")]
 use leptos::prelude::*;
 #[cfg(feature = "ssr")]
@@ -34,31 +32,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = conf.leptos_options.site_addr;
     let leptos_options = conf.leptos_options;
 
-    // Keep the dedicated game storage bootstrap alive alongside the UI server.
+    // Комнаты хранятся целиком: при старте сервер загружает их из базы,
+    // при изменениях — сохраняет карту обратно.
     let data_dir = Path::new("data");
     tokio::fs::create_dir_all(data_dir).await?;
-    let db_path = data_dir.join("game_history.redb");
-    let store = GameStore::open(&db_path)?;
-    let mut directory = RoomDirectory::with_history_store(store);
+    let rooms_path = data_dir.join("rooms.redb");
+    let store = RoomStore::open(&rooms_path)?;
+    let mut directory = RoomDirectory::default();
+    for (id, room) in store.load_rooms()? {
+        directory.insert(id, room);
+    }
+    if directory.is_empty() {
+        let owner_id = Uuid::generate();
+        let default_room_id = directory.create(
+            owner_id,
+            RoomMode::Online {
+                global: true,
+                open: true,
+            },
+        );
+        store.save_rooms(directory.rooms())?;
+        println!(
+            "[Server] Created default online room (ID: {default_room_id}) owned by user {owner_id}"
+        );
+    }
 
     let users_path = data_dir.join("users.redb");
     let users = UserStore::open(&users_path)?;
     let api = api_router(ApiState::new(users));
 
-    let owner_id = Uuid::generate();
-    let default_room_id = directory.create(
-        owner_id,
-        RoomMode::Online {
-            global: true,
-            open: true,
-        },
-    );
-
-    println!("[Server] Initialized storage at {db_path:?}");
+    println!("[Server] Initialized room storage at {rooms_path:?}");
     println!("[Server] Initialized accounts at {users_path:?}");
-    println!(
-        "[Server] Created default online room (ID: {default_room_id}) owned by user {owner_id}"
-    );
 
     let routes = generate_route_list(App);
 

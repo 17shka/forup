@@ -15,6 +15,9 @@ pub use room::{
     RoomId, RoomMode, Status,
 };
 
+mod storage;
+pub use storage::{RoomStore, StorageError};
+
 /// Ненулевой идентификатор: `Option<Uuid>` занимает столько же места, сколько `u32`.
 pub type Uuid = NonZeroU32;
 

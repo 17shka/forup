@@ -12,8 +12,7 @@ use crate::api::network::Uuid; // NonZeroU32
 pub mod prelude {
     pub use super::{
         Board, BoardCode, BotConfig, CellAbility, CellData, CharacterData, CharacterId,
-        ExplosionMode, Game, GameAction, GameError, GameSnapshot, MemberId, MemberStat, Score,
-        TeamId, Timeline,
+        ExplosionMode, Game, GameAction, GameError, MemberId, MemberStat, Score, TeamId,
     };
 }
 
@@ -306,31 +305,6 @@ mod game_rule_tests {
     }
 
     #[test]
-    fn compact_snapshot_reconstructs_initial_distribution_and_turn() {
-        let mut game = Game::new(Board::new(size(6, 6)));
-        game.add_local_member(uid(1), tid(1)).unwrap();
-        game.add_local_member(uid(2), tid(2)).unwrap();
-        game.start(true).unwrap();
-
-        let snapshot = game.snapshot(true);
-        let restored = snapshot.restore();
-
-        assert_eq!(restored.board, game.board);
-        assert_eq!(restored.current_turn, game.current_turn);
-    }
-
-    #[test]
-    fn snapshot_keeps_the_explosion_mode() {
-        let mut game = Game::standard();
-        game.explosion_mode = ExplosionMode::Lossless;
-
-        assert_eq!(
-            game.snapshot(false).restore().explosion_mode,
-            ExplosionMode::Lossless
-        );
-    }
-
-    #[test]
     fn safe_radius_is_clamped_to_the_table_maximum() {
         let mut game = Game::new(Board::new(size(10, 10)));
         game.add_local_member(uid(1), tid(1)).unwrap();
@@ -497,7 +471,7 @@ mod game_rule_tests {
         board[pos(0)] = CellData {
             value: 3,
             owner: Some(tid(1)),
-            ability: CellAbility::None,
+            ..CellData::default()
         };
         let mut blasts = Vec::new();
 
@@ -517,7 +491,7 @@ mod game_rule_tests {
         board[pos(0)] = CellData {
             value: 3,
             owner: Some(tid(1)),
-            ability: CellAbility::None,
+            ..CellData::default()
         };
         let mut blasts = Vec::new();
 
@@ -583,22 +557,6 @@ pub enum GameError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Timeline {
-    Action(GameAction),
-    End,
-}
-
-impl Timeline {
-    pub fn new(action: GameAction) -> Self {
-        Self::Action(action)
-    }
-
-    fn game_ended() -> Self {
-        Self::End
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameAction {
     Increase(BoardCode),
     Decrease(BoardCode),
@@ -606,46 +564,19 @@ pub enum GameAction {
     Surrender,
 }
 
+/// Партия целиком: участники, доска и правила. Поля закрыты — доступ
+/// только через методы, чтобы состояние нельзя было изменить в обход проверок.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Game {
-    pub characters: IndexMap<CharacterId, CharacterData>,
-    pub current_turn: Option<usize>,
-    pub timeline: Vec<Timeline>,
-    pub board: Board,
-    pub explosion_mode: ExplosionMode,
+    characters: IndexMap<CharacterId, CharacterData>,
+    current_turn: Option<usize>,
+    board: Board,
+    explosion_mode: ExplosionMode,
     /// Квадрат «безопасного радиуса»: минимальное расстояние от стартовой клетки
     /// до уже занятых клеток. Меняется только через [`Game::set_safe_radius`],
     /// которая не даёт превысить [`Game::max_safe_radius`].
     #[serde(default)]
     safe_radius: u8,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GameSnapshot {
-    pub characters: Vec<(CharacterId, CharacterData)>,
-    pub board_size: BoardCode,
-    pub explosion_mode: ExplosionMode,
-    #[serde(default)]
-    pub safe_radius: u8,
-    /// Началась ли партия с автоматической раздачей стартовых клеток.
-    /// [`GameSnapshot::restore`] повторяет раздачу, чтобы поле совпало с исходным.
-    #[serde(default)]
-    pub automatic_distribution: bool,
-}
-
-impl GameSnapshot {
-    pub fn restore(&self) -> Game {
-        let mut game = Game::new(Board::new(self.board_size));
-        game.characters = self.characters.iter().copied().collect();
-        game.characters.sort_keys();
-        game.current_turn = Some(0);
-        game.explosion_mode = self.explosion_mode;
-        game.safe_radius = self.safe_radius;
-        if self.automatic_distribution {
-            game.distribute_start_cells();
-        }
-        game
-    }
 }
 
 impl Game {
@@ -668,21 +599,64 @@ impl Game {
         self.current_turn.is_some()
     }
 
-    /// Компактный снимок для повтора партии. `automatic_distribution` решает,
-    /// повторит ли [`GameSnapshot::restore`] раздачу стартовых клеток.
-    pub fn snapshot(&self, automatic_distribution: bool) -> GameSnapshot {
-        let mut characters: Vec<_> = self
+    /// Turn order: characters in the order they make moves.
+    pub fn characters(&self) -> &IndexMap<CharacterId, CharacterData> {
+        &self.characters
+    }
+
+    /// Index of the character making the current move, if the game is running.
+    pub fn current_turn(&self) -> Option<usize> {
+        self.current_turn
+    }
+
+    pub fn board(&self) -> &Board {
+        &self.board
+    }
+
+    pub fn explosion_mode(&self) -> ExplosionMode {
+        self.explosion_mode
+    }
+
+    /// Меняет режим взрывов. Только до старта партии.
+    pub fn set_explosion_mode(&mut self, mode: ExplosionMode) -> Result<(), GameError> {
+        if self.is_started() {
+            return Err(GameError::GameAlreadyStarted);
+        }
+        self.explosion_mode = mode;
+        Ok(())
+    }
+
+    /// Меняет размер доски. Только до старта партии.
+    pub fn set_board_size(&mut self, size: BoardCode) -> Result<(), GameError> {
+        if self.is_started() {
+            return Err(GameError::GameAlreadyStarted);
+        }
+        self.board.set_size(size);
+        Ok(())
+    }
+
+    /// Передаёт персонажа другому контроллеру (игрок или бот). Только до
+    /// старта партии.
+    pub fn set_controller(
+        &mut self,
+        member_id: CharacterId,
+        controller: MemberId,
+    ) -> Result<(), GameError> {
+        if self.is_started() {
+            return Err(GameError::GameAlreadyStarted);
+        }
+        let character = self
             .characters
-            .iter()
-            .map(|(&id, &character)| (id, character))
-            .collect();
-        characters.sort_unstable_by_key(|(id, _)| *id);
-        GameSnapshot {
-            characters,
-            board_size: self.board.size(),
-            explosion_mode: self.explosion_mode,
-            safe_radius: self.safe_radius(),
-            automatic_distribution,
+            .get_mut(&member_id)
+            .ok_or(GameError::CharacterNotFound)?;
+        character.controller = controller;
+        Ok(())
+    }
+
+    /// Обнуляет статистику всех персонажей (возврат в лобби).
+    pub fn reset_stats(&mut self) {
+        for character in self.characters.values_mut() {
+            character.stats = MemberStat::default();
         }
     }
 
@@ -777,10 +751,6 @@ impl Game {
         }
     }
 
-    fn log(&mut self, action: GameAction) {
-        self.timeline.push(Timeline::new(action));
-    }
-
     /// Adds another seat controlled by the same local player/device.
     pub fn add_local_member(
         &mut self,
@@ -873,7 +843,6 @@ impl Game {
             return Err(GameError::NotEnoughTeams);
         }
 
-        self.timeline.clear();
         for (_, character) in self.characters.iter_mut() {
             character.stats = MemberStat::default();
         }
@@ -933,7 +902,6 @@ impl Game {
             return Err(GameError::GameNotStarted);
         }
         self.current_turn = None;
-        self.timeline.push(Timeline::game_ended());
         Ok(())
     }
 
@@ -1138,8 +1106,6 @@ impl Game {
                 None
             }
         };
-
-        self.log(action);
 
         if move_winner.is_some() {
             return Ok(move_winner);
@@ -1540,10 +1506,11 @@ impl Board {
         let cell = &mut self[pos];
         cell.value = cell.value.saturating_add(delta).max(0);
         cell.owner = Some(team);
+        cell.activated = true;
         on_step(self);
 
         let mut waves = 0;
-        while self.explode_wave(blasts, mode) {
+        while self.explode_activated(blasts, mode) {
             waves += 1;
             on_step(self);
             if stop_after_wave(self) {
@@ -1553,16 +1520,25 @@ impl Board {
         waves
     }
 
-    fn explode_wave(&mut self, blasts: &mut Vec<Blast>, mode: ExplosionMode) -> bool {
+    /// Один проход цепочки взрывов. Взрывает клетки с отметкой `activated`,
+    /// способные взорваться, и отмечает все задетые клетки для следующего
+    /// прохода. Когда активных взрывов не осталось, отметки сбрасываются и
+    /// цепочка считается завершённой. Ранний выход (например, победа одной
+    /// команды) оставляет отметки — так состояние цепочки переживает
+    /// сохранение и продолжится на следующем ходу.
+    fn explode_activated(&mut self, blasts: &mut Vec<Blast>, mode: ExplosionMode) -> bool {
         blasts.clear();
 
         for (slot, &cell) in self.cells.iter().enumerate() {
-            if cell.can_explode() {
+            if cell.activated && cell.can_explode() {
                 blasts.push(Blast::new(self, Self::pos_from_slot(slot), cell, mode));
             }
         }
 
         if blasts.is_empty() {
+            for cell in &mut self.cells {
+                cell.activated = false;
+            }
             return false;
         }
 
@@ -1578,6 +1554,7 @@ impl Board {
                     continue;
                 };
                 let target = &mut self[t];
+                target.activated = true;
                 if dmg == 0 {
                     target.value = target.value.saturating_add(b.share);
                     target.owner = b.owner;
@@ -1585,6 +1562,13 @@ impl Board {
                     target.apply_ability_damage(dmg);
                 }
             }
+        }
+
+        // После раздачи урона пересчитываем отметку взорванной клетки: она
+        // могла снова зарядиться от соседей и взорвётся в следующем проходе.
+        for b in blasts.iter() {
+            let cell = &mut self[b.pos];
+            cell.activated = cell.can_explode();
         }
 
         true
@@ -1727,6 +1711,11 @@ pub struct CellData {
     pub value: i8,
     pub ability: CellAbility,
     pub owner: Option<TeamId>,
+    /// Клетка задета текущей цепочкой взрывов: она проверяется в следующем
+    /// проходе [`Board::explode_activated`]. Сбрасывается, когда цепочка
+    /// завершается. Переживает сохранение, так что цепочку можно продолжить.
+    #[serde(default)]
+    pub activated: bool,
 }
 
 impl CellData {

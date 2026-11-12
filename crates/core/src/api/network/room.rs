@@ -3,12 +3,11 @@ use std::num::NonZeroU8;
 
 use crate::api::game::board::{
     Board, BoardCode, BotConfig, CharacterId, ExplosionMode, Game, GameAction, GameError, MemberId,
-    TeamId, Timeline,
+    TeamId,
 };
-use crate::api::game::storage::{GameId, GameMetadata, GameStore, HistoryError};
 use serde::{Deserialize, Serialize};
 
-use super::{Uuid, UuidExt};
+use super::Uuid;
 
 pub type RoomId = Uuid;
 
@@ -207,7 +206,7 @@ pub enum Status {
     Ready,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoomMode {
     Offline,
     Online {
@@ -233,7 +232,6 @@ pub enum RoomError {
     Offline,
     GlobalTransportUnavailable,
     Game(GameError),
-    History(HistoryError),
 }
 
 impl From<GameError> for RoomError {
@@ -242,9 +240,11 @@ impl From<GameError> for RoomError {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Комната целиком: режим, участники, права и партия. Сервер хранит комнаты
+/// в `BTreeMap<RoomId, Room>` и сохраняет карту в базу; идентичность комнаты —
+/// её ключ в этой карте, поэтому отдельного поля идентификатора нет.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Room {
-    id: RoomId,
     mode: RoomMode,
     members: HashMap<Uuid, MemberData>,
     /// Room-wide policy used by members without an override.
@@ -252,45 +252,21 @@ pub struct Room {
     bots: HashMap<CharacterId, BotConfig>,
     game: Game,
     automatic_distribution: bool,
-    has_started: bool,
-    history_store: Option<GameStore>,
-    game_id: Option<GameId>,
 }
 
 impl Room {
     pub fn new(owner: Uuid, mode: RoomMode) -> Self {
-        Self::with_id(owner, owner, mode)
-    }
-
-    fn with_id(id: RoomId, owner: Uuid, mode: RoomMode) -> Self {
         let mut game = Game::standard();
         game.join(owner, TeamId::MIN)
             .expect("a new room must have space for its owner");
         Self {
-            id,
             mode,
             members: HashMap::from([(owner, MemberData::admin(Status::NotReady))]),
             rights: GameRights::default(),
             bots: HashMap::new(),
             game,
             automatic_distribution: true,
-            has_started: false,
-            history_store: None,
-            game_id: None,
         }
-    }
-
-    pub fn id(&self) -> RoomId {
-        self.id
-    }
-
-    fn with_history_store(mut self, store: GameStore) -> Self {
-        self.history_store = Some(store);
-        self
-    }
-
-    pub fn game_id(&self) -> Option<GameId> {
-        self.game_id
     }
 
     pub fn owner(&self) -> Option<Uuid> {
@@ -341,15 +317,11 @@ impl Room {
         &self.game
     }
 
-    pub(crate) fn has_started(&self) -> bool {
-        self.has_started
-    }
-
     /// Lowest team id not yet used by any seat.
     pub fn next_team_id(&self) -> TeamId {
         let used_teams: BTreeSet<_> = self
             .game
-            .characters
+            .characters()
             .values()
             .map(|member| member.team_id)
             .collect();
@@ -381,19 +353,14 @@ impl Room {
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
-        let member = self
-            .game
-            .characters
-            .get_mut(&member_id)
-            .ok_or(GameError::CharacterNotFound)?;
-        if is_bot {
-            member.controller = MemberId::Bot;
+        let controller = if is_bot {
             self.bots.insert(member_id, BotConfig::STANDARD);
+            MemberId::Bot
         } else {
-            member.controller = MemberId::Player(actor);
             self.bots.remove(&member_id);
-        }
-        Ok(())
+            MemberId::Player(actor)
+        };
+        Ok(self.game.set_controller(member_id, controller)?)
     }
 
     pub fn set_board_size(&mut self, actor: Uuid, width: u8, height: u8) -> Result<(), RoomError> {
@@ -405,8 +372,7 @@ impl Room {
             .zip(NonZeroU8::new(height))
             .and_then(|(w, h)| BoardCode::from_size(w, h))
             .ok_or(RoomError::InvalidBoardSize)?;
-        self.game.board.set_size(size);
-        Ok(())
+        Ok(self.game.set_board_size(size)?)
     }
 
     pub fn set_automatic_distribution(
@@ -428,15 +394,12 @@ impl Room {
         lossless: bool,
     ) -> Result<(), RoomError> {
         self.ensure_game_rule(actor)?;
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted.into());
-        }
-        self.game.explosion_mode = if lossless {
+        let mode = if lossless {
             ExplosionMode::Lossless
         } else {
             ExplosionMode::Lossy
         };
-        Ok(())
+        Ok(self.game.set_explosion_mode(mode)?)
     }
 
     /// Sets the squared safe radius for start cells. The value is clamped to
@@ -475,12 +438,13 @@ impl Room {
     }
 
     pub fn reset(&mut self) {
-        let size = self.game.board.size();
-        let explosion_mode = self.game.explosion_mode;
+        let size = self.game.board().size();
+        let explosion_mode = self.game.explosion_mode();
         let safe_radius = self.game.safe_radius();
         let automatic = self.automatic_distribution;
         let mut game = Game::new(Board::new(size));
-        game.explosion_mode = explosion_mode;
+        game.set_explosion_mode(explosion_mode)
+            .expect("a fresh game accepts any explosion mode");
 
         // Re-seat every member on their own team so the lobby stays consistent
         // with the member list after the game is cleared.
@@ -500,16 +464,14 @@ impl Room {
         self.game = game;
         self.automatic_distribution = automatic;
         self.bots.clear();
-        self.has_started = false;
-        self.game_id = None;
     }
 
     /// Plays out every consecutive bot turn directly on the game.
     fn run_bot_turns(&self, game: &mut Game) -> Result<(), GameError> {
         while game.is_started() {
             let Some(member_id) = game
-                .current_turn
-                .and_then(|turn| game.characters.get_index(turn).map(|(id, _)| *id))
+                .current_turn()
+                .and_then(|turn| game.characters().get_index(turn).map(|(id, _)| *id))
             else {
                 break;
             };
@@ -561,23 +523,19 @@ impl Room {
 
     pub fn leave(&mut self, player: Uuid) -> Result<(), RoomError> {
         let controller = MemberId::Player(player);
-        let mut game = self.game.clone();
-        let first_new_event = game.timeline.len();
-        let characters: Vec<_> = game
-            .characters
+        let characters: Vec<_> = self
+            .game
+            .characters()
             .iter()
             .filter(|(_, data)| data.controller == controller)
             .map(|(id, _)| *id)
             .collect();
         for id in characters {
-            game.leave(id);
+            self.game.leave(id);
         }
-
-        self.persist_timeline(&game.timeline[first_new_event..])?;
 
         self.members.remove(&player);
         self.promote_admin_if_needed();
-        self.game = game;
         self.compact_teams();
         Ok(())
     }
@@ -610,7 +568,7 @@ impl Room {
 
         let is_own = self
             .game
-            .characters
+            .characters()
             .get(&target_member)
             .is_some_and(|character| character.controller == MemberId::Player(actor));
         let may_change = self
@@ -648,7 +606,7 @@ impl Room {
         if matches!(self.mode, RoomMode::Online { .. }) {
             let is_owner_seat = self
                 .game
-                .characters
+                .characters()
                 .get(&member_id)
                 .is_some_and(|character| match character.controller {
                     MemberId::Player(player) => self.is_admin(player),
@@ -661,7 +619,7 @@ impl Room {
 
         let controller = self
             .game
-            .characters
+            .characters()
             .get(&member_id)
             .ok_or(GameError::CharacterNotFound)?
             .controller;
@@ -670,7 +628,7 @@ impl Room {
             MemberId::Player(player) => {
                 if !self
                     .game
-                    .characters
+                    .characters()
                     .values()
                     .any(|character| character.controller == controller)
                     && !self.is_admin(player)
@@ -717,18 +675,30 @@ impl Room {
         }
         let used: Vec<TeamId> = self
             .game
-            .characters
+            .characters()
             .values()
             .map(|member| member.team_id)
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        for member in self.game.characters.values_mut() {
-            let index = used
-                .iter()
-                .position(|team| *team == member.team_id)
-                .expect("the member's team is among used teams") as u8;
-            member.team_id = NonZeroU8::new(index + 1).expect("team ids fit into 1..=255");
+        let remap: Vec<(CharacterId, u8)> = self
+            .game
+            .characters()
+            .iter()
+            .map(|(&id, member)| {
+                let index = used
+                    .iter()
+                    .position(|team| *team == member.team_id)
+                    .expect("the member's team is among used teams");
+                (id, index as u8 + 1)
+            })
+            .collect();
+        for (member, team_number) in remap {
+            if let Some(new_team) = NonZeroU8::new(team_number) {
+                self.game
+                    .change_team(member, new_team)
+                    .expect("compaction only renumbers existing members");
+            }
         }
     }
 
@@ -739,7 +709,7 @@ impl Room {
         // not block the game from reporting the real problem.
         let seated: BTreeSet<Uuid> = self
             .game
-            .characters
+            .characters()
             .values()
             .filter_map(|character| match character.controller {
                 MemberId::Player(player) => Some(player),
@@ -756,30 +726,15 @@ impl Room {
         let mut game = self.game.clone();
         game.start(automatic_distribution)?;
 
-        if let Some(store) = &self.history_store {
-            let game_id = store
-                .start_game(self.id.get(), &game, automatic_distribution)
-                .map_err(RoomError::History)?;
-            self.game_id = Some(game_id);
-        }
-
         self.run_bot_turns(&mut game)?;
-        self.persist_timeline(&game.timeline)?;
 
         self.game = game;
-        self.has_started = true;
         Ok(())
     }
 
     pub fn end_game(&mut self, actor: Uuid) -> Result<(), RoomError> {
         self.ensure_owner(actor)?;
-        let mut game = self.game.clone();
-        let first_new_event = game.timeline.len();
-        game.end_game()?;
-
-        self.persist_timeline(&game.timeline[first_new_event..])?;
-
-        self.game = game;
+        self.game.end_game()?;
         Ok(())
     }
 
@@ -789,57 +744,21 @@ impl Room {
         member_id: CharacterId,
         action: GameAction,
     ) -> Result<Option<TeamId>, RoomError> {
-        let character = self
+        let controller = self
             .game
-            .characters
+            .characters()
             .get(&member_id)
-            .ok_or(GameError::CharacterNotFound)?;
-        if character.controller != MemberId::Player(actor) {
+            .ok_or(GameError::CharacterNotFound)?
+            .controller;
+        if controller != MemberId::Player(actor) {
             return Err(RoomError::PermissionDenied);
         }
 
         let mut game = self.game.clone();
-        let first_new_event = game.timeline.len();
         let result = game.apply_action(member_id, action)?;
         self.run_bot_turns(&mut game)?;
-        self.persist_timeline(&game.timeline[first_new_event..])?;
         self.game = game;
         Ok(result)
-    }
-
-    /// Saves the current game state as a checkpoint so it can be resumed later.
-    /// Requires the room to have a history store configured.
-    pub fn save_game(&mut self) -> Result<GameId, RoomError> {
-        let Some(store) = &self.history_store else {
-            return Err(RoomError::History(HistoryError::Database(
-                "no history store configured".into(),
-            )));
-        };
-        let game_id = store
-            .save_checkpoint(self.id.get(), &self.game)
-            .map_err(RoomError::History)?;
-        self.game_id = Some(game_id);
-        Ok(game_id)
-    }
-
-    /// Returns metadata for all saved games in this room, ordered by save time.
-    /// Requires the room to have a history store configured.
-    pub fn past_games(&self) -> Result<Vec<GameMetadata>, RoomError> {
-        let Some(store) = &self.history_store else {
-            return Err(RoomError::History(HistoryError::Database(
-                "no history store configured".into(),
-            )));
-        };
-        store.list_games(self.id.get()).map_err(RoomError::History)
-    }
-
-    fn persist_timeline(&self, events: &[Timeline]) -> Result<(), RoomError> {
-        if let (Some(store), Some(game_id)) = (&self.history_store, self.game_id) {
-            store
-                .append_timeline(game_id, events)
-                .map_err(RoomError::History)?;
-        }
-        Ok(())
     }
 
     /// Requires the actor to be an administrator (full rights).
@@ -876,32 +795,38 @@ impl Room {
 #[derive(Clone, Debug, Default)]
 pub struct RoomDirectory {
     rooms: BTreeMap<RoomId, Room>,
-    history_store: Option<GameStore>,
 }
 
 impl RoomDirectory {
-    pub fn with_history_store(history_store: GameStore) -> Self {
-        Self {
-            rooms: BTreeMap::new(),
-            history_store: Some(history_store),
-        }
+    /// Выбирает следующий свободный порядковый идентификатор комнаты.
+    fn next_room_id(&self) -> RoomId {
+        let taken = |id: u32| Uuid::new(id).filter(|&id| !self.rooms.contains_key(&id));
+        let next = self
+            .rooms
+            .last_key_value()
+            .map_or(1, |(&id, _)| id.get().saturating_add(1));
+        taken(next)
+            .or_else(|| (1..=u32::MAX).find_map(taken))
+            .expect("room id space exhausted")
     }
 
     pub fn create(&mut self, owner: Uuid, mode: RoomMode) -> RoomId {
-        let id = loop {
-            let candidate = Uuid::generate();
-            if !self.rooms.contains_key(&candidate) {
-                break candidate;
-            }
-        };
-        let room = Room::with_id(id, owner, mode);
-        let room = if let Some(store) = &self.history_store {
-            room.with_history_store(store.clone())
-        } else {
-            room
-        };
-        self.rooms.insert(id, room);
+        let id = self.next_room_id();
+        self.rooms.insert(id, Room::new(owner, mode));
         id
+    }
+
+    /// Восстанавливает комнату под конкретным ключом (например, из базы).
+    pub fn insert(&mut self, id: RoomId, room: Room) {
+        self.rooms.insert(id, room);
+    }
+
+    pub fn rooms(&self) -> &BTreeMap<RoomId, Room> {
+        &self.rooms
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rooms.is_empty()
     }
 
     pub fn get(&self, id: RoomId) -> Option<&Room> {
@@ -957,10 +882,6 @@ mod tests {
         TeamId::new(id).unwrap()
     }
 
-    fn pos(slot: u8) -> BoardCode {
-        BoardCode::from_slot(slot)
-    }
-
     #[test]
     fn owner_can_open_close_and_players_can_join_only_when_open() {
         let owner = uid(10);
@@ -1011,14 +932,14 @@ mod tests {
         room.join(guest, tid(1)).unwrap();
         let guest_character = room
             .game()
-            .characters
+            .characters()
             .iter()
             .find(|(_, character)| character.controller == MemberId::Player(guest))
             .map(|(&id, _)| id)
             .unwrap();
         let owner_character = room
             .game()
-            .characters
+            .characters()
             .iter()
             .find(|(_, character)| character.controller == MemberId::Player(owner))
             .map(|(&id, _)| id)
@@ -1048,7 +969,7 @@ mod tests {
         assert_eq!(room.members().len(), 1);
         assert!(room.members().contains_key(&owner));
         assert!(!room.members().contains_key(&guest));
-        assert!(!room.game().characters.contains_key(&guest_character));
+        assert!(!room.game().characters().contains_key(&guest_character));
 
         let bot_id = room.add_bot(owner, tid(2)).unwrap();
         assert_eq!(room.bots().get(&bot_id), Some(&BotConfig::STANDARD));
@@ -1069,14 +990,14 @@ mod tests {
         room.join(guest, tid(1)).unwrap();
         let owner_character = room
             .game()
-            .characters
+            .characters()
             .iter()
             .find(|(_, character)| character.controller == MemberId::Player(owner))
             .map(|(&id, _)| id)
             .unwrap();
         let guest_character = room
             .game()
-            .characters
+            .characters()
             .iter()
             .find(|(_, character)| character.controller == MemberId::Player(guest))
             .map(|(&id, _)| id)
@@ -1123,7 +1044,7 @@ mod tests {
         room.join(guest, tid(1)).unwrap();
         let guest_character = room
             .game()
-            .characters
+            .characters()
             .iter()
             .find(|(_, character)| character.controller == MemberId::Player(guest))
             .map(|(&id, _)| id)
@@ -1164,7 +1085,7 @@ mod tests {
         room.join(guest, tid(1)).unwrap();
         let guest_character = room
             .game()
-            .characters
+            .characters()
             .iter()
             .find(|(_, character)| character.controller == MemberId::Player(guest))
             .map(|(&id, _)| id)
@@ -1234,90 +1155,6 @@ mod tests {
     }
 
     #[test]
-    fn room_start_and_actions_are_persisted_for_replay() {
-        use crate::api::game::storage::GameStore;
-
-        let path =
-            std::env::temp_dir().join(format!("forup-room-history-{}.redb", Uuid::generate()));
-        let store = GameStore::open(&path).unwrap();
-        let mut directory = RoomDirectory::with_history_store(store.clone());
-        let owner = uid(10);
-        let guest = uid(20);
-        let room_id = directory.create(
-            owner,
-            RoomMode::Online {
-                global: false,
-                open: true,
-            },
-        );
-        let other_room_id = directory.create(
-            owner,
-            RoomMode::Online {
-                global: false,
-                open: true,
-            },
-        );
-        assert_ne!(room_id, other_room_id);
-
-        directory.join(room_id, guest, tid(2)).unwrap();
-        let owner_character = directory
-            .get(room_id)
-            .unwrap()
-            .game()
-            .characters
-            .iter()
-            .find(|(_, character)| character.controller == MemberId::Player(owner))
-            .map(|(&id, _)| id)
-            .unwrap();
-        assert_eq!(
-            directory.get_mut(room_id).unwrap().start(owner, false),
-            Err(RoomError::MembersNotReady)
-        );
-
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .set_ready(owner, true)
-            .unwrap();
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .set_ready(guest, true)
-            .unwrap();
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .start(owner, false)
-            .unwrap();
-
-        let game_id = directory.get(room_id).unwrap().game_id().unwrap();
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .apply_action(owner, owner_character, GameAction::Increase(pos(0)))
-            .unwrap();
-        directory.get_mut(room_id).unwrap().end_game(owner).unwrap();
-
-        assert_eq!(store.games_for_room(room_id.get()).unwrap(), vec![game_id]);
-        let history = store.load(game_id).unwrap().unwrap();
-        assert_eq!(history.snapshot.characters.len(), 2);
-
-        assert_eq!(history.timeline.len(), 2);
-        assert_eq!(
-            history.timeline[0],
-            Timeline::Action(GameAction::Increase(pos(0))),
-        );
-        assert_eq!(history.timeline[1], Timeline::End);
-        let replayed = history.replay().unwrap();
-        assert_eq!(replayed.board, directory.get(room_id).unwrap().game().board);
-        assert_eq!(replayed.current_turn, None);
-
-        drop(directory);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
     fn offline_room_cannot_be_joined_or_opened() {
         let mut directory = RoomDirectory::default();
         let room_id = directory.create(uid(10), RoomMode::Offline);
@@ -1328,245 +1165,6 @@ mod tests {
         assert_eq!(
             directory.get_mut(room_id).unwrap().set_open(uid(10), true),
             Err(RoomError::Offline)
-        );
-    }
-
-    fn offline_lobby() -> Room {
-        let mut room = Room::new(uid(10), RoomMode::Offline);
-        room.set_board_size(uid(10), 8, 8).unwrap();
-        room
-    }
-
-    #[test]
-    fn lobby_settings_and_members_are_backed_by_the_game_model() {
-        let mut room = Room::new(uid(10), RoomMode::Offline);
-        assert_eq!((room.view_state().width, room.view_state().height), (8, 8));
-
-        room.set_board_size(uid(10), 6, 5).unwrap();
-        room.set_automatic_distribution(uid(10), false).unwrap();
-        room.add_local_member(uid(10)).unwrap();
-        room.add_bot(uid(10), room.next_team_id()).unwrap();
-        let lobby = room.view_state();
-        // Ширина и высота нормализуются: 6 × 5 и 5 × 6 — один размер.
-        assert_eq!((lobby.width, lobby.height), (5, 6));
-        assert_eq!(lobby.members.len(), 3);
-        assert_eq!(lobby.teams.len(), 3);
-        assert!(lobby.members.iter().any(|member| member.is_bot));
-        assert_eq!(
-            room.set_board_size(uid(20), 6, 5),
-            Err(RoomError::PermissionDenied)
-        );
-    }
-
-    #[test]
-    fn starts_with_or_without_automatic_cell_distribution() {
-        let mut distributed = offline_lobby();
-        distributed
-            .add_bot(uid(10), distributed.next_team_id())
-            .unwrap();
-        distributed.set_ready(uid(10), true).unwrap();
-        distributed.start(uid(10), true).unwrap();
-        let started = distributed.view_state();
-        assert!(started.is_started);
-        assert_eq!(started.teams[0].cell_count, 1);
-        assert_eq!(started.teams[1].cell_count, 1);
-        assert!(!started.legal_moves.is_empty());
-
-        let mut empty = offline_lobby();
-        empty.set_automatic_distribution(uid(10), false).unwrap();
-        empty.add_local_member(uid(10)).unwrap();
-        empty.set_ready(uid(10), true).unwrap();
-        empty.start(uid(10), false).unwrap();
-        let started = empty.view_state();
-        assert!(!started.can_decrease);
-        assert!(!started.can_skip);
-        assert!(started.teams.iter().all(|team| team.cell_count == 0));
-        assert_eq!(started.legal_moves.len(), 64);
-        assert_eq!(
-            empty.apply_action(uid(10), CharacterId::MIN, GameAction::Skip),
-            Err(RoomError::Game(GameError::FirstMoveRequiresEmptyCell))
-        );
-    }
-
-    #[test]
-    fn player_actions_run_bots_and_support_skip_and_surrender() {
-        let mut room = offline_lobby();
-        room.add_bot(uid(10), room.next_team_id()).unwrap();
-        room.set_ready(uid(10), true).unwrap();
-        room.start(uid(10), true).unwrap();
-        let player_id = room.view_state().current_member_id.unwrap();
-        let after_skip = {
-            room.apply_action(uid(10), player_id, GameAction::Skip)
-                .unwrap();
-            room.view_state()
-        };
-
-        assert!(after_skip.is_started);
-        assert_eq!(after_skip.current_member_id, Some(player_id));
-        assert_eq!(room.game().characters[&player_id].stats.skipped_moves, 1);
-        assert_eq!(room.game().timeline.len(), 2);
-
-        room.apply_action(uid(10), player_id, GameAction::Surrender)
-            .unwrap();
-        let game_over = room.view_state();
-        assert!(game_over.is_game_over);
-        assert_eq!(game_over.winner_team, Some(tid(2)));
-    }
-
-    #[test]
-    fn members_can_change_teams_and_kinds_and_be_removed() {
-        let mut room = offline_lobby();
-        let second_player = room.add_local_member(uid(10)).unwrap();
-        let bot = room.add_bot(uid(10), room.next_team_id()).unwrap();
-
-        room.change_team(uid(10), second_player, tid(2)).unwrap();
-        assert_eq!(
-            room.view_state()
-                .members
-                .iter()
-                .find(|member| member.id == second_player)
-                .unwrap()
-                .team_id,
-            tid(2)
-        );
-        // Все игроки могут быть удалены - остаётся только бот для наблюдения.
-        room.kick_member(uid(10), second_player).unwrap();
-        room.kick_member(uid(10), CharacterId::MIN).unwrap();
-        let bots_only = room.view_state();
-        assert_eq!(bots_only.members.len(), 1);
-        assert!(bots_only.members.iter().all(|member| member.is_bot));
-
-        // Переключение вида участника делает бота игроком и наоборот.
-        room.set_member_kind(uid(10), bot, false).unwrap();
-        assert!(
-            !room
-                .view_state()
-                .members
-                .iter()
-                .find(|member| member.id == bot)
-                .unwrap()
-                .is_bot
-        );
-        room.set_member_kind(uid(10), bot, true).unwrap();
-        assert!(
-            room.view_state()
-                .members
-                .iter()
-                .find(|member| member.id == bot)
-                .unwrap()
-                .is_bot
-        );
-        assert_eq!(
-            room.set_member_kind(uid(10), CharacterId::new(200).unwrap(), false),
-            Err(RoomError::Game(GameError::CharacterNotFound))
-        );
-
-        // После удаления всех игроков игра стартовать не может.
-        assert_eq!(
-            room.start(uid(10), true),
-            Err(RoomError::Game(GameError::NotEnoughMembers))
-        );
-    }
-
-    #[test]
-    fn reset_clears_the_game_but_keeps_the_board_size() {
-        let mut room = offline_lobby();
-        room.add_bot(uid(10), room.next_team_id()).unwrap();
-        room.set_ready(uid(10), true).unwrap();
-        room.start(uid(10), true).unwrap();
-        room.reset();
-
-        let state = room.view_state();
-        assert!(!state.is_started);
-        assert!(!state.is_game_over);
-        assert_eq!((state.width, state.height), (8, 8));
-        assert_eq!(state.members.len(), 1);
-        assert!(!state.members[0].is_bot);
-        assert_eq!(state.teams.len(), 1);
-    }
-
-    #[test]
-    fn save_game_and_past_games() {
-        use crate::api::game::storage::GameStore;
-
-        let path = std::env::temp_dir().join(format!("forup-room-save-{}.redb", Uuid::generate()));
-        let store = GameStore::open(&path).unwrap();
-        let mut directory = RoomDirectory::with_history_store(store.clone());
-
-        let owner = uid(10);
-        let room_id = directory.create(
-            owner,
-            RoomMode::Online {
-                global: false,
-                open: true,
-            },
-        );
-
-        directory.join(room_id, uid(20), tid(2)).unwrap();
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .set_ready(owner, true)
-            .unwrap();
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .set_ready(uid(20), true)
-            .unwrap();
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .start(owner, true)
-            .unwrap();
-
-        let room = directory.get(room_id).unwrap();
-        let player_id = room.view_state().current_member_id.unwrap();
-        let _ = room;
-
-        // Make a move
-        directory
-            .get_mut(room_id)
-            .unwrap()
-            .apply_action(owner, player_id, GameAction::Increase(pos(0)))
-            .unwrap();
-
-        // Save checkpoint
-        let checkpoint_id = directory.get_mut(room_id).unwrap().save_game().unwrap();
-
-        // List past games - start() also saves metadata, so there are 2 games
-        let past = directory.get(room_id).unwrap().past_games().unwrap();
-        assert_eq!(past.len(), 2);
-        // The latest save should be our checkpoint
-        assert_eq!(past[1].game_id, checkpoint_id);
-        assert_eq!(past[1].room_id, room_id.get());
-        assert!(!past[1].is_completed);
-
-        // Load checkpoint and verify state
-        let loaded = store.load_checkpoint(checkpoint_id).unwrap().unwrap();
-        assert_eq!(loaded.board, directory.get(room_id).unwrap().game().board);
-
-        drop(directory);
-        drop(store);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn save_game_without_history_store_errors() {
-        let mut directory = RoomDirectory::default();
-        let room_id = directory.create(
-            uid(10),
-            RoomMode::Online {
-                global: false,
-                open: true,
-            },
-        );
-        assert_eq!(
-            directory.get_mut(room_id).unwrap().save_game(),
-            Err(RoomError::History(
-                crate::api::game::storage::HistoryError::Database(
-                    "no history store configured".into(),
-                )
-            ))
         );
     }
 }
