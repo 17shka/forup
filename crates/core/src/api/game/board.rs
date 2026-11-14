@@ -417,6 +417,134 @@ mod game_rule_tests {
     }
 
     #[test]
+    fn surrender_is_allowed_even_out_of_turn() {
+        let mut game = Game::new(Board::new(size(3, 3)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.add_local_member(uid(3), tid(3)).unwrap();
+        game.start(false).unwrap();
+
+        // Первый ход за cid(1): сдача чужого места больше не требует очереди.
+        game.surrender(cid(2)).unwrap();
+        assert_eq!(game.characters[&cid(2)].stats.losses, 1);
+        // Очередь хода остаётся текущему игроку.
+        assert_eq!(game.current_turn, Some(0));
+        // Своим ходом сдаться по-прежнему можно.
+        game.surrender(cid(1)).unwrap();
+        assert_eq!(game.characters[&cid(1)].stats.losses, 1);
+    }
+
+    #[test]
+    fn end_game_requires_a_started_game() {
+        let mut game = Game::new(Board::new(size(3, 3)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+
+        assert_eq!(game.end_game(), Err(GameError::GameNotStarted));
+    }
+
+    #[test]
+    fn end_game_crowns_the_mass_leader() {
+        let mut game = Game::new(Board::new(size(3, 3)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.start(false).unwrap();
+        game.board[pos(0)] = CellData {
+            value: 3,
+            owner: Some(tid(1)),
+            ..CellData::default()
+        };
+        game.board[pos(1)] = CellData {
+            value: 1,
+            owner: Some(tid(2)),
+            ..CellData::default()
+        };
+
+        let winner = game.end_game().unwrap();
+
+        assert_eq!(winner, tid(1));
+        assert!(!game.is_started());
+        assert_eq!(game.characters[&cid(1)].stats.wins, 1);
+        assert_eq!(game.characters[&cid(2)].stats.losses, 1);
+    }
+
+    #[test]
+    fn end_game_on_empty_board_crowns_the_first_seat() {
+        let mut game = Game::new(Board::new(size(3, 3)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.start(false).unwrap();
+
+        let winner = game.end_game().unwrap();
+
+        assert_eq!(winner, tid(1));
+        assert!(!game.is_started());
+        assert_eq!(game.characters[&cid(1)].stats.wins, 1);
+        assert_eq!(game.characters[&cid(2)].stats.losses, 1);
+    }
+
+    #[test]
+    fn swapped_turn_order_survives_start() {
+        let mut game = Game::new(Board::new(size(3, 3)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.add_local_member(uid(3), tid(3)).unwrap();
+
+        game.swap_turn_order(cid(2), cid(3)).unwrap();
+        let order: Vec<CharacterId> = game.characters().keys().copied().collect();
+        assert_eq!(order, vec![cid(1), cid(3), cid(2)]);
+
+        game.start(false).unwrap();
+        // Порядок не пересортировывается при старте.
+        let order: Vec<CharacterId> = game.characters().keys().copied().collect();
+        assert_eq!(order, vec![cid(1), cid(3), cid(2)]);
+        assert_eq!(game.current_turn, Some(0));
+
+        game.increase(cid(1), pos(0)).unwrap();
+        // Вторым за столом теперь ходит cid(3).
+        assert_eq!(game.current_turn, Some(1));
+        assert!(game.check_turn(cid(3)).is_ok());
+
+        // После старта порядок менять нельзя.
+        assert_eq!(
+            game.swap_turn_order(cid(1), cid(2)),
+            Err(GameError::GameAlreadyStarted)
+        );
+    }
+
+    #[test]
+    fn game_equality_accounts_for_turn_order() {
+        let mut game = Game::new(Board::new(size(3, 3)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+
+        let mut swapped = game.clone();
+        swapped.swap_turn_order(cid(1), cid(2)).unwrap();
+        // Один и тот же состав в другом порядке — разные партии: иначе
+        // клиент принял бы снапшот со свапом за подтверждение старого.
+        assert_ne!(game, swapped);
+
+        swapped.swap_turn_order(cid(1), cid(2)).unwrap();
+        assert_eq!(game, swapped);
+    }
+
+    #[test]
+    fn leaving_mid_game_counts_as_a_loss_out_of_turn() {
+        let mut game = Game::new(Board::new(size(3, 3)));
+        game.add_local_member(uid(1), tid(1)).unwrap();
+        game.add_local_member(uid(2), tid(2)).unwrap();
+        game.add_local_member(uid(3), tid(3)).unwrap();
+        game.start(false).unwrap();
+
+        // Выходит не тот участник, чей ход: поражение всё равно фиксируется.
+        game.leave(cid(2));
+
+        assert_eq!(game.characters[&cid(2)].stats.losses, 1);
+        assert_eq!(game.current_turn, Some(0));
+        assert!(game.is_started());
+    }
+
+    #[test]
     fn explosions_stop_as_soon_as_one_team_is_left() {
         let mut game = Game::new(Board::new(size(3, 3)));
         game.add_local_member(uid(1), tid(1)).unwrap();
@@ -525,7 +653,7 @@ mod game_rule_tests {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameError {
     GameNotStarted,
     CharacterNotFound,
@@ -547,7 +675,7 @@ pub enum GameError {
 
 /// Партия целиком: участники, доска и правила. Поля закрыты — доступ
 /// только через методы, чтобы состояние нельзя было изменить в обход проверок.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, Serialize, Deserialize)]
 pub struct Game {
     characters: IndexMap<CharacterId, CharacterData>,
     current_turn: Option<usize>,
@@ -558,6 +686,26 @@ pub struct Game {
     /// которая не даёт превысить [`Game::max_safe_radius`].
     #[serde(default)]
     safe_radius: u8,
+}
+
+/// Порядок персонажей — часть состояния партии (последовательность
+/// ходов). Производное `PartialEq` для `IndexMap` сравнивает пары
+/// «ключ–значение» без учёта порядка, из-за чего снапшот с изменённой
+/// очерёдностью выглядел бы равным прежнему состоянию клиента и не
+/// применялся. Поэтому записи сверяются позиционно.
+impl PartialEq for Game {
+    fn eq(&self, other: &Self) -> bool {
+        self.current_turn == other.current_turn
+            && self.board == other.board
+            && self.explosion_mode == other.explosion_mode
+            && self.safe_radius == other.safe_radius
+            && self.characters.len() == other.characters.len()
+            && self
+                .characters
+                .iter()
+                .zip(other.characters.iter())
+                .all(|((left_id, left), (right_id, right))| left_id == right_id && left == right)
+    }
 }
 
 impl Game {
@@ -772,7 +920,10 @@ impl Game {
 
     pub fn leave(&mut self, member_id: CharacterId) {
         if self.is_started() {
-            let _ = self.surrender(member_id);
+            // Выход из партии — поражение независимо от того, чей сейчас ход:
+            // покидающий игру не должен блокировать чужие ходы.
+            self.eliminate(member_id);
+            let _ = self.outcome();
             return;
         }
 
@@ -829,7 +980,6 @@ impl Game {
         }
         self.board.clear_cells();
 
-        self.characters.sort_keys();
         self.safe_radius = self.safe_radius();
         self.current_turn = Some(0);
 
@@ -878,11 +1028,55 @@ impl Game {
         self.board.clear_cells();
     }
 
-    pub fn end_game(&mut self) -> Result<(), GameError> {
+    /// Принудительно завершает партию: победителем становится команда-
+    /// лидер по массе, а при пустой доске — команда первого участника
+    /// в порядке ходов. Возвращает команду-победителя.
+    pub fn end_game(&mut self) -> Result<TeamId, GameError> {
         if !self.is_started() {
             return Err(GameError::GameNotStarted);
         }
+        let winner = self
+            .board
+            .mass_leader()
+            .or_else(|| self.characters.values().next().map(|c| c.team_id))
+            .ok_or(GameError::NoMembers)?;
+
+        let losers: Vec<CharacterId> = self
+            .characters
+            .iter()
+            .filter(|(id, m)| m.team_id != winner && !self.is_eliminated(**id))
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in losers {
+            self.eliminate(id);
+        }
         self.current_turn = None;
+        self.award_win(winner);
+        Ok(winner)
+    }
+
+    /// Меняет местами позиции двух участников в последовательности ходов.
+    /// Доступно только до начала партии.
+    pub fn swap_turn_order(&mut self, a: CharacterId, b: CharacterId) -> Result<(), GameError> {
+        if self.is_started() {
+            return Err(GameError::GameAlreadyStarted);
+        }
+        if !self.characters.contains_key(&a) || !self.characters.contains_key(&b) {
+            return Err(GameError::CharacterNotFound);
+        }
+        if a == b {
+            return Ok(());
+        }
+        let ia = self
+            .characters
+            .get_index_of(&a)
+            .expect("contains_key проверен выше");
+        let ib = self
+            .characters
+            .get_index_of(&b)
+            .expect("contains_key проверен выше");
+        self.characters.swap_indices(ia, ib);
         Ok(())
     }
 
@@ -953,7 +1147,8 @@ impl Game {
     }
 
     /// Сдача: участник получает поражение, партия продолжается, пока
-    /// остаются другие команды.
+    /// остаются другие команды. Сдаться можно в любой момент, даже не
+    /// своим ходом: очередь хода при этом не меняется.
     pub fn surrender(&mut self, member_id: CharacterId) -> Result<Option<TeamId>, GameError> {
         if !self.is_started() {
             return Err(GameError::GameNotStarted);

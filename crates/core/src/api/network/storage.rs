@@ -143,7 +143,7 @@ mod tests {
         let online_id = directory.create(
             owner,
             RoomMode::Online {
-                global: false,
+                // global: false,
                 open: true,
             },
         );
@@ -153,8 +153,8 @@ mod tests {
         {
             let offline = directory.get_mut(offline_id).unwrap();
             offline.add_bot(uid(11), TeamId::new(2).unwrap()).unwrap();
+            // Готовность владельца автостартует партию.
             offline.set_ready(uid(11), true).unwrap();
-            offline.start(uid(11), true).unwrap();
         }
         assert!(directory.get(offline_id).unwrap().game().is_started());
         assert_eq!(directory.get(online_id).unwrap().members().len(), 2);

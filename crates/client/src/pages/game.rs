@@ -1,4 +1,5 @@
 use forup_core::api::game::board::prelude::{BoardCode, GameError};
+use forup_core::api::network::RoomError;
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use thaw::{
@@ -6,9 +7,11 @@ use thaw::{
     ToasterInjection,
 };
 
-use crate::components::{GameSettingsPanel, ModeCheckbox, TeamsPanel};
+use crate::auth::AuthState;
+use crate::components::{GameSettingsPanel, ModeCheckbox, RoomPlayersPanel, TeamsPanel};
 use crate::game::{Controller, GamePhase, GameSession, LocalGame, MoveMode};
 use crate::i18n::*;
+use crate::net::NetError;
 use crate::settings::Settings;
 
 /// Maps a display grid coordinate back to the board slot after `turn`
@@ -90,6 +93,7 @@ pub fn GamePage() -> impl IntoView {
     let navigate = use_navigate();
     let session = GameSession::expect();
     let settings = Settings::expect();
+    let auth = AuthState::expect();
 
     // The board can be resized in the lobby, so keep the size in a memo: the
     // grid is rebuilt only when the size changes, while every cell stays bound
@@ -103,16 +107,25 @@ pub fn GamePage() -> impl IntoView {
                 Some(team) => t_string!(i18n, team_won, id = team.get()).to_string(),
                 None => t_string!(i18n, game_over).to_string(),
             },
-            GamePhase::Playing => match game
-                .current_character()
-                .and_then(|character| game.character_participant(character))
-            {
-                Some((_, Controller::Bot(number))) => {
-                    t_string!(i18n, turn_bot, id = number).to_string()
+            GamePhase::Playing => {
+                let current = game.current_participant_id().and_then(|id| {
+                    game.participants
+                        .iter()
+                        .find(|participant| participant.id == id)
+                        .map(|participant| (participant.controller, participant.name.clone()))
+                });
+                match current {
+                    Some((Controller::Bot(number), _)) => {
+                        t_string!(i18n, turn_bot, id = number).to_string()
+                    }
+                    Some((Controller::Human, _)) => t_string!(i18n, your_turn).to_string(),
+                    Some((Controller::Remote(id), name)) => {
+                        let label = name.unwrap_or_else(|| format!("#{id}"));
+                        t_string!(i18n, turn_player, id = label).to_string()
+                    }
+                    None => t_string!(i18n, game_over).to_string(),
                 }
-                Some((_, Controller::Human)) => t_string!(i18n, your_turn).to_string(),
-                None => t_string!(i18n, game_over).to_string(),
-            },
+            }
         })
     };
 
@@ -145,7 +158,7 @@ pub fn GamePage() -> impl IntoView {
         class
     };
 
-    let error_text = move |error: GameError| -> String {
+    let error_text = move |error: &GameError| -> String {
         match error {
             GameError::GameNotStarted => t_string!(i18n, error_game_not_started).to_string(),
             GameError::CharacterNotFound => t_string!(i18n, error_character_not_found).to_string(),
@@ -172,7 +185,7 @@ pub fn GamePage() -> impl IntoView {
         let current = session.error.get();
         if let Some(error) = current {
             if previous.flatten() != Some(error) {
-                let message = error_text(error);
+                let message = error_text(&error);
                 toaster.dispatch_toast(
                     move || {
                         view! {
@@ -189,22 +202,149 @@ pub fn GamePage() -> impl IntoView {
         current
     });
 
+    // Сетевые ошибки комнаты — тем же тостом. Тюнинг сообщения зависит от
+    // варианта: ошибки движка переиспользуют локальные тексты.
+    let net_error_text = move |error: &NetError| -> String {
+        match error {
+            NetError::Room(RoomError::Game(game_error)) => error_text(game_error),
+            NetError::Room(RoomError::MembersNotReady) => {
+                t_string!(i18n, error_members_not_ready).to_string()
+            }
+            NetError::Room(RoomError::NotFound) => {
+                t_string!(i18n, error_room_not_found).to_string()
+            }
+            NetError::Room(RoomError::Closed) => t_string!(i18n, error_room_closed).to_string(),
+            NetError::Room(_) => t_string!(i18n, error_generic).to_string(),
+            NetError::Kicked => t_string!(i18n, error_kicked).to_string(),
+            NetError::Unauthorized | NetError::Transport(_) => {
+                t_string!(i18n, error_connection).to_string()
+            }
+        }
+    };
+    Effect::new(move |previous: Option<Option<NetError>>| {
+        let current = session.net_error.get();
+        if previous.flatten() != current {
+            if let Some(error) = current.clone() {
+                let message = net_error_text(&error);
+                toaster.dispatch_toast(
+                    move || {
+                        view! {
+                            <Toast>
+                                <ToastTitle>{message}</ToastTitle>
+                            </Toast>
+                        }
+                    },
+                    ToastOptions::default().with_intent(ToastIntent::Error),
+                );
+                session.net_error.set(None);
+            }
+        }
+        current
+    });
+
+    // Цикл опроса комнаты: каждый снапшот перезаписывает `room` (set всегда
+    // уведомляет), эффект перезапускает цепочку таймеров; смена/потеря
+    // комнаты или размонтирование страницы гасят её через поколение.
+    Effect::new(move |_| {
+        let room = session.room.get();
+        session.bump_poll();
+        if room.is_some() {
+            session.schedule_room_poll();
+        }
+    });
+    on_cleanup(move || session.bump_poll());
+
     let on_exit = move |_| {
-        session.reset();
+        if session.room.get_untracked().is_some() {
+            session.leave_room();
+        } else {
+            session.reset();
+        }
         navigate("/", Default::default());
     };
-    let on_skip = move |_| session.dispatch(LocalGame::skip);
-    let on_surrender = move |_| session.dispatch(LocalGame::surrender);
-    let on_ready = move |_| session.dispatch(LocalGame::ready);
+    let on_skip = move |_| {
+        if session.room.get_untracked().is_some() {
+            session.net_skip();
+        } else {
+            session.dispatch(LocalGame::skip);
+        }
+    };
+    let on_surrender = move |_| {
+        if session.room.get_untracked().is_some() {
+            session.net_surrender();
+        } else {
+            session.dispatch(LocalGame::surrender);
+        }
+    };
+    // Офлайн-игрок — администратор собственного стола.
+    let is_admin = move || session.room.get().is_none_or(|room| room.is_admin);
+    let on_finish = move |_| {
+        if session.room.get_untracked().is_some() {
+            session.net_end_game();
+        } else {
+            session.dispatch(LocalGame::end_game);
+        }
+    };
+    let on_ready = move |_| {
+        match session.room.get_untracked() {
+            // Онлафн: кнопка работает как переключатель готовности для всех —
+            // и админа, и участника. Повторное нажатие снимает готовность.
+            // «Заново» после конца партии — тоже эта кнопка: локальное
+            // предсказание подтверждается сервером.
+            Some(_) => {
+                let finished = session
+                    .state
+                    .with_untracked(|game| game.phase == GamePhase::Finished);
+                if finished {
+                    session.net_rematch();
+                } else {
+                    let ready = session.state.with_untracked(LocalGame::own_ready) != Some(true);
+                    session.net_set_ready(ready);
+                }
+            }
+            None => {
+                let finished = session
+                    .state
+                    .with_untracked(|game| game.phase == GamePhase::Finished);
+                if finished {
+                    session.dispatch(LocalGame::rematch);
+                } else {
+                    session.dispatch(LocalGame::ready);
+                }
+            }
+        }
+    };
 
     let ready_label = move || {
         session.state.with(|game| {
-            if game.phase == GamePhase::Finished {
-                t_string!(i18n, rematch).to_string()
-            } else {
-                t_string!(i18n, ready).to_string()
+            let room = session.room.get();
+            let finished = game.phase == GamePhase::Finished;
+            match room {
+                Some(_) => {
+                    if finished {
+                        t_string!(i18n, rematch).to_string()
+                    } else if game.own_ready() == Some(true) {
+                        t_string!(i18n, waiting_ready).to_string()
+                    } else {
+                        t_string!(i18n, ready).to_string()
+                    }
+                }
+                None => {
+                    if finished {
+                        t_string!(i18n, rematch).to_string()
+                    } else {
+                        t_string!(i18n, ready).to_string()
+                    }
+                }
             }
         })
+    };
+
+    // Зелёная пока не готов / красная у готового (повторное нажатие снимает).
+    let ready_on = move || {
+        let online = session.room.get().is_some();
+        let finished = session.state.with(|game| game.phase == GamePhase::Finished);
+        !online || finished || session.state.with(LocalGame::own_ready) == Some(true)
     };
 
     let mode_checked = Signal::derive(move || session.mode.get() == MoveMode::Increase);
@@ -255,6 +395,9 @@ pub fn GamePage() -> impl IntoView {
         pump_generation.set(generation);
 
         if !session.state.with(LocalGame::is_animating) {
+            // Анимация закончилась — применяем снапшот, отложенный на её
+            // время, чтобы чужие ходы не обрывались одиночным флешем.
+            session.flush_pending_snapshot();
             return;
         }
         if delay == 0.0 {
@@ -280,12 +423,36 @@ pub fn GamePage() -> impl IntoView {
     view! {
         <div class="page game-page">
 
+            <Show when=move || session.room.get().is_some()>
+                <RoomPlayersPanel/>
+            </Show>
+
             <TeamsPanel/>
 
             <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
                 <div class=banner_class>
                     <span class=turn_dot_class style=turn_dot_style></span>
                     <span class="turn-banner__text">{turn_text}</span>
+                    <div class="turn-banner__side">
+                        <Show
+                            when=move || {
+                                session.state.with(|game| {
+                                    game.phase == GamePhase::Playing
+                                        && !game.is_choosing_start_cell()
+                                        && game.is_human_turn()
+                                })
+                            }
+                        >
+                            <div class="mode-toggle" role="group">
+                                <ModeCheckbox
+                                    checked=mode_checked
+                                    set_checked=set_mode
+                                    label=mode_label
+                                    disabled=mode_disabled
+                                />
+                            </div>
+                        </Show>
+                    </div>
                 </div>
             </Show>
 
@@ -339,7 +506,11 @@ pub fn GamePage() -> impl IntoView {
                             };
                             let on_click = move |_| {
                                 let selected = mode.get_untracked();
-                                session.dispatch(move |game| game.make_move(pos, selected));
+                                if session.room.get_untracked().is_some() {
+                                    session.net_move(pos, selected);
+                                } else {
+                                    session.dispatch(move |game| game.make_move(pos, selected));
+                                }
                             };
 
                             view! {
@@ -369,28 +540,6 @@ pub fn GamePage() -> impl IntoView {
                 }}
             </div>
 
-            <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
-                <div class="turn-controls">
-                    <Show
-                        when=move || {
-                            session.state.with(|game| {
-                                game.phase == GamePhase::Playing
-                                    && !game.is_choosing_start_cell()
-                            })
-                        }
-                    >
-                        <div class="mode-toggle" role="group">
-                            <ModeCheckbox
-                                checked=mode_checked
-                                set_checked=set_mode
-                                label=mode_label
-                                disabled=mode_disabled
-                            />
-                        </div>
-                    </Show>
-                </div>
-            </Show>
-
             <div class="game-actions">
                 <Button
                     class="game-action"
@@ -400,6 +549,33 @@ pub fn GamePage() -> impl IntoView {
                     <span class="game-action__icon" aria-hidden="true">"⎋"</span>
                     <span class="game-action__label">{t!(i18n, exit)}</span>
                 </Button>
+                <Show when=move || session.state.with(LocalGame::has_playable_seat)>
+                    <Button
+                        class="game-action game-action--danger"
+                        appearance=ButtonAppearance::Secondary
+                        disabled=move || !session.state.with(LocalGame::can_surrender)
+                        on_click=on_surrender
+                    >
+                        <span class="game-action__icon" aria-hidden="true">"🏳"</span>
+                        <span class="game-action__label">{t!(i18n, surrender)}</span>
+                    </Button>
+                </Show>
+                <Show when=move || {
+                    session.state.with(|game| {
+                        game.phase == GamePhase::Playing
+                            && !game.has_playable_seat()
+                            && is_admin()
+                    })
+                }>
+                    <Button
+                        class="game-action game-action--danger"
+                        appearance=ButtonAppearance::Secondary
+                        on_click=on_finish
+                    >
+                        <span class="game-action__icon" aria-hidden="true">"🏁"</span>
+                        <span class="game-action__label">{t!(i18n, finish_game)}</span>
+                    </Button>
+                </Show>
                 <Show when=move || session.state.with(LocalGame::is_human_turn)>
                     <Button
                         class="game-action"
@@ -411,20 +587,16 @@ pub fn GamePage() -> impl IntoView {
                         <span class="game-action__label">{t!(i18n, skip)}</span>
                     </Button>
                 </Show>
-                <Show when=move || session.state.with(|game| game.phase == GamePhase::Playing)>
-                    <Button
-                        class="game-action game-action--danger"
-                        appearance=ButtonAppearance::Secondary
-                        disabled=move || !session.state.with(LocalGame::can_surrender)
-                        on_click=on_surrender
-                    >
-                        <span class="game-action__icon" aria-hidden="true">"🏳"</span>
-                        <span class="game-action__label">{t!(i18n, surrender)}</span>
-                    </Button>
-                </Show>
                 <Show when=move || session.state.with(|game| game.phase != GamePhase::Playing)>
                     <Button
-                        class="game-action game-action--ready"
+                        class=Signal::derive(move || {
+                            if ready_on() {
+                                "game-action game-action--ready game-action--ready-on"
+                            } else {
+                                "game-action game-action--ready game-action--ready-off"
+                            }
+                            .to_string()
+                        })
                         appearance=ButtonAppearance::Primary
                         size=ButtonSize::Medium
                         on_click=on_ready
@@ -442,6 +614,63 @@ pub fn GamePage() -> impl IntoView {
                     <span class="game-action__label">{t!(i18n, rotate_board)}</span>
                 </Button>
             </div>
+
+            // Выбор режима и настройки — только когда стол локальный или
+            // у игрока есть права администратора комнаты.
+            <Show when=move || {
+                session.state.with(|game| game.phase == GamePhase::Lobby)
+                    && (session.room.get().is_none()
+                        || session.room.get().is_some_and(|room| room.is_admin))
+            }>
+                <div class="room-mode" role="group">
+                    {move || {
+                        let offline_active = session.room.get().is_none();
+                        view! {
+                            <button
+                                type="button"
+                                class=if offline_active {
+                                    "room-mode__button room-mode__button--active"
+                                } else {
+                                    "room-mode__button"
+                                }
+                                on:click=move |_| {
+                                    if session.room.get_untracked().is_some() {
+                                        // Переключение в офлайн сохраняет стол:
+                                        // участники и настройки не меняются.
+                                        session.go_offline();
+                                    }
+                                }
+                            >
+                                {t!(i18n, offline)}
+                            </button>
+                            <button
+                                type="button"
+                                class=if offline_active {
+                                    "room-mode__button"
+                                } else {
+                                    "room-mode__button room-mode__button--active"
+                                }
+                                disabled=move || auth.user.get().is_none()
+                                title=move || {
+                                    if auth.user.get().is_some() {
+                                        String::new()
+                                    } else {
+                                        t_string!(i18n, multiplayer_requires_account).to_string()
+                                    }
+                                }
+                                on:click=move |_| {
+                                    if session.room.get_untracked().is_none() {
+                                        let token = auth.token.get_untracked();
+                                        session.connect_new_room(&token, true, || {});
+                                    }
+                                }
+                            >
+                                {t!(i18n, online)}
+                            </button>
+                        }
+                    }}
+                </div>
+            </Show>
 
             <GameSettingsPanel/>
         </div>

@@ -6,6 +6,7 @@ pub mod app;
 pub mod auth;
 mod components;
 mod game;
+pub mod net;
 mod pages;
 mod settings;
 

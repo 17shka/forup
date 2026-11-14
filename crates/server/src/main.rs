@@ -1,8 +1,12 @@
 #[cfg(feature = "ssr")]
 use std::path::Path;
+#[cfg(feature = "ssr")]
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ssr")]
 mod api;
+#[cfg(feature = "ssr")]
+mod rooms;
 
 #[cfg(feature = "ssr")]
 use api::{ApiState, router as api_router};
@@ -19,7 +23,7 @@ use client::app::{App, shell};
 #[cfg(feature = "ssr")]
 use forup_core::api::auth::UserStore;
 #[cfg(feature = "ssr")]
-use forup_core::api::network::{RoomDirectory, RoomMode, RoomStore, Uuid, UuidExt};
+use forup_core::api::network::{RoomDirectory, RoomStore};
 #[cfg(feature = "ssr")]
 use leptos::prelude::*;
 #[cfg(feature = "ssr")]
@@ -33,33 +37,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let leptos_options = conf.leptos_options;
 
     // Комнаты хранятся целиком: при старте сервер загружает их из базы,
-    // при изменениях — сохраняет карту обратно.
+    // при изменениях — сохраняет карту обратно. Старый формат базы может
+    // не декодироваться — тогда стартуем с пустой картой.
     let data_dir = Path::new("data");
     tokio::fs::create_dir_all(data_dir).await?;
     let rooms_path = data_dir.join("rooms.redb");
     let store = RoomStore::open(&rooms_path)?;
     let mut directory = RoomDirectory::default();
-    for (id, room) in store.load_rooms()? {
-        directory.insert(id, room);
-    }
-    if directory.is_empty() {
-        let owner_id = Uuid::generate();
-        let default_room_id = directory.create(
-            owner_id,
-            RoomMode::Online {
-                global: true,
-                open: true,
-            },
-        );
-        store.save_rooms(directory.rooms())?;
-        println!(
-            "[Server] Created default online room (ID: {default_room_id}) owned by user {owner_id}"
-        );
+    match store.load_rooms() {
+        Ok(rooms) => {
+            for (id, room) in rooms {
+                directory.insert(id, room);
+            }
+        }
+        Err(error) => eprintln!("[Server] failed to load rooms: {error}"),
     }
 
     let users_path = data_dir.join("users.redb");
     let users = UserStore::open(&users_path)?;
-    let api = api_router(ApiState::new(users));
+    let rooms = Arc::new(Mutex::new(directory));
+    let api = api_router(ApiState::new(users, rooms, store));
 
     println!("[Server] Initialized room storage at {rooms_path:?}");
     println!("[Server] Initialized accounts at {users_path:?}");

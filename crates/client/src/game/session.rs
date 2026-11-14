@@ -1,8 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use forup_core::api::game::board::prelude::*;
-use forup_core::api::network::Uuid;
+use forup_core::api::network::{
+    LobbySeat, LobbySetup, ReplayStep, Room, RoomId, RoomStateResponse, Status, Uuid,
+};
 use leptos::prelude::*;
+
+use crate::net::NetError;
 
 /// Deterministic identity for the first human seat so server-rendered markup
 /// matches the hydrated one.
@@ -18,6 +22,8 @@ pub type ParticipantId = u32;
 pub enum Controller {
     Human,
     Bot(u8),
+    /// Сетевой участник: идентификатор его аккаунта на сервере.
+    Remote(u32),
 }
 
 impl Controller {
@@ -26,6 +32,7 @@ impl Controller {
         match self {
             Self::Human => "human".to_string(),
             Self::Bot(number) => format!("bot{number}"),
+            Self::Remote(id) => format!("remote{id}"),
         }
     }
 
@@ -40,11 +47,15 @@ impl Controller {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Participant {
     pub id: ParticipantId,
     pub controller: Controller,
     pub characters: Vec<CharacterId>,
+    /// Отображаемое имя сетевого участника (только для онлайн-комнат).
+    pub name: Option<String>,
+    /// Готовность сетевого участника; офлайн всегда `None`.
+    pub ready: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +76,7 @@ pub enum MoveMode {
 /// [`Self::make_move`] применяет изменение клетки, затем волны взрывов
 /// доигрываются по одной через [`Self::animation_step`], чтобы UI
 /// анимировал их с настраиваемой скоростью.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LocalGame {
     pub game: Game,
     pub participants: Vec<Participant>,
@@ -79,8 +90,23 @@ pub struct LocalGame {
     /// одна волна взрывов): анимируется только изменившаяся на этом шаге
     /// клетка.
     changes: Vec<i16>,
-    /// Alternating value used to restart CSS animations on repeated changes.
+    /// Чередующееся значение для перезапуска CSS-анимаций при повторных
+    /// изменениях.
     pub animation_tick: u64,
+    /// Идентичность игрока в онлайн-комнате; `None` — партия офлайн.
+    me: Option<Uuid>,
+    /// Игроки онлайн-комнаты для панели над списком команд; офлайн пуст.
+    pub players: Vec<RoomPlayer>,
+    /// Шаги серверного «реплея» (чужие ходы), доигрываемые по одному,
+    /// чтобы взрывы анимировались волна за волной, как в офлайне.
+    replay: Vec<ReplayStep>,
+    /// Водяной знак снапшотов: номер последнего принятого состояния комнаты.
+    sync_seq: u64,
+    /// Номер снапшота, к которому приведёт доигрывание текущего реплея.
+    replay_seq: u64,
+    /// Предсказанный ход: локально применённое действие, которое сервер
+    /// подтвердит (или отклонит — тогда реплей вернёт ход заново).
+    predicted: Option<ReplayStep>,
 }
 
 impl LocalGame {
@@ -97,6 +123,12 @@ impl LocalGame {
             exploding: false,
             changes,
             animation_tick: 0,
+            me: None,
+            players: Vec::new(),
+            replay: Vec::new(),
+            sync_seq: 0,
+            replay_seq: 0,
+            predicted: None,
         };
         local
             .add_participant_on_team(Controller::Human, TeamId::MIN)
@@ -108,6 +140,219 @@ impl LocalGame {
             )
             .expect("a fresh game has free character ids");
         local
+    }
+
+    /// Восстанавливает локальное представление из снапшота серверной комнаты:
+    /// одно место = один участник, сетевые места помечаются `Remote`.
+    /// На native вызывается только тестами: сетевой клиент существует лишь
+    /// в wasm-сборке.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn from_room(room: &Room, me: Uuid, names: &HashMap<u32, String>) -> Self {
+        let game = room.game().clone();
+        let phase = if game.is_started() {
+            GamePhase::Playing
+        } else if game.characters().values().any(|data| data.stats.wins > 0) {
+            GamePhase::Finished
+        } else {
+            GamePhase::Lobby
+        };
+        let winner = (phase == GamePhase::Finished)
+            .then(|| Self::winner_from_stats(&game))
+            .flatten();
+
+        let mut players = Vec::new();
+        for (id, data) in room.members() {
+            players.push(RoomPlayer {
+                id: id.get(),
+                name: names.get(&id.get()).cloned(),
+                ready: data.status() == Status::Ready,
+                admin: data.is_admin(),
+            });
+        }
+        players.sort_unstable_by_key(|player| player.id);
+
+        let mut participants = Vec::new();
+        let mut max_id = 0;
+        for (character, data) in game.characters() {
+            let (controller, name, ready) = match data.controller {
+                MemberId::Player(player) => {
+                    let ready = room
+                        .member(player)
+                        .map(|member| member.status() == Status::Ready);
+                    let name = names.get(&player.get()).cloned();
+                    if player == me {
+                        (Controller::Human, name, ready)
+                    } else {
+                        (Controller::Remote(player.get()), name, ready)
+                    }
+                }
+                MemberId::Bot => (
+                    Controller::Bot(
+                        room.bot_labels()
+                            .get(character)
+                            .copied()
+                            .unwrap_or(character.get()),
+                    ),
+                    None,
+                    None,
+                ),
+            };
+            max_id = max_id.max(u32::from(character.get()));
+            participants.push(Participant {
+                id: u32::from(character.get()),
+                controller,
+                characters: vec![*character],
+                name,
+                ready,
+            });
+        }
+
+        let changes = vec![0; game.board().cells().len()];
+        Self {
+            game,
+            participants,
+            next_participant_id: max_id.saturating_add(1),
+            phase,
+            winner,
+            automatic_distribution: room.automatic_distribution(),
+            exploding: false,
+            changes,
+            animation_tick: 0,
+            me: Some(me),
+            players,
+            replay: Vec::new(),
+            sync_seq: room.seq(),
+            replay_seq: 0,
+            predicted: None,
+        }
+    }
+
+    /// Принимает следующий снапшот комнаты, сохраняя контекст анимации:
+    /// дельты клеток считаются относительно предыдущего состояния, чтобы
+    /// чужие ходы пульсировали так же, как локальные. Неизменившийся снапшот
+    /// не перезапускает анимации (защита от спама опросом).
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn absorb(&mut self, next: LocalGame) {
+        let before = self.cell_values();
+        let board_changed = before.len() != next.game.board().cells().len();
+        let state_changed = self.game != next.game;
+        let tick = self.animation_tick.wrapping_add(1);
+        *self = next;
+        if !board_changed && state_changed {
+            self.snapshot_deltas(&before);
+            self.animation_tick = tick;
+        }
+    }
+
+    /// Равны ли метаданные тому, что копирует [`Self::confirm`]: контекст
+    /// анимации (`changes`, `animation_tick`, `exploding`) и очередь реплея
+    /// не сравниваются, иначе равные снапшоты опроса перезапускали бы
+    /// уведомления после каждого хода.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn same_snapshot_meta(&self, other: &LocalGame) -> bool {
+        self.participants == other.participants
+            && self.players == other.players
+            && self.phase == other.phase
+            && self.winner == other.winner
+            && self.automatic_distribution == other.automatic_distribution
+            && self.me == other.me
+            && self.next_participant_id == other.next_participant_id
+            && self.sync_seq == other.sync_seq
+    }
+
+    /// Тихо принимает серверный снапшот с той же игрой (предсказание
+    /// подтвердилось): копируются только метаданные, локальный контекст
+    /// анимации не трогается, чтобы волны взрывов не мигали.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn confirm(&mut self, next: LocalGame) {
+        self.sync_seq = next.sync_seq;
+        self.participants = next.participants;
+        self.players = next.players;
+        self.phase = next.phase;
+        self.winner = next.winner;
+        self.automatic_distribution = next.automatic_distribution;
+        self.me = next.me;
+        self.next_participant_id = next.next_participant_id;
+        self.replay.clear();
+        self.replay_seq = 0;
+        self.predicted = None;
+    }
+
+    /// Отключает партию от сети, сохраняя стол: сетевые места становятся
+    /// локальными игроками, а очередь реплея сбрасывается. Владелец комнаты
+    /// остаётся оператором лобби даже без своего места.
+    pub fn detach(&mut self) {
+        self.me = None;
+        self.players.clear();
+        self.replay.clear();
+        self.replay_seq = 0;
+        self.sync_seq = 0;
+        self.predicted = None;
+        for participant in &mut self.participants {
+            if let Controller::Bot(_) = participant.controller {
+                continue;
+            }
+            participant.controller = Controller::Human;
+            participant.name = None;
+            participant.ready = None;
+        }
+    }
+
+    /// Начинает серверный реплей чужих ходов. Сначала шаги проверяются на
+    /// копии движка: любое расхождение с целевым состоянием (`target`)
+    /// отклоняет реплей целиком — партия рассинхронизирована и требует
+    /// полного ресинка. Наш предсказанный ход из очереди вырезается: он уже
+    /// применён локально. Возвращает `true`, если реплей принят.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn start_replay(&mut self, steps: &[ReplayStep], target: &Game, seq: u64) -> bool {
+        let mut steps = steps.to_vec();
+        if steps.first() == self.predicted.as_ref() {
+            steps.remove(0);
+        }
+        self.predicted = None;
+
+        let mut probe = self.game.clone();
+        for step in &steps {
+            let applied: Result<(), GameError> = match *step {
+                ReplayStep::Start { automatic } => probe.start(automatic).map(|_| ()),
+                ReplayStep::Move {
+                    member,
+                    pos,
+                    increase,
+                } => probe.start_move(member, pos, increase).and_then(|()| {
+                    while probe.explode_wave() {}
+                    probe.finish_move().map(|_| ())
+                }),
+                ReplayStep::Skip { member } => probe.skip(member).map(|_| ()),
+                ReplayStep::Surrender { member } => probe.surrender(member).map(|_| ()),
+            };
+            if applied.is_err() {
+                return false;
+            }
+        }
+        if probe != *target {
+            return false;
+        }
+
+        self.replay = steps;
+        self.replay_seq = seq;
+        let _ = self.begin_replay_step();
+        true
     }
 
     // --- lobby ------------------------------------------------------------
@@ -145,12 +390,16 @@ impl LocalGame {
         let character = match controller {
             Controller::Human => self.game.add_local_member(Self::human_uuid()?, team)?,
             Controller::Bot(_) => self.game.add_bot(team)?,
+            // Сетевые места появляются только из серверных снапшотов.
+            Controller::Remote(_) => return Err(GameError::CharacterNotFound),
         };
 
         self.participants.push(Participant {
             id,
             controller,
             characters: vec![character],
+            name: None,
+            ready: None,
         });
         Ok(id)
     }
@@ -164,7 +413,7 @@ impl LocalGame {
             .iter()
             .filter_map(|participant| match participant.controller {
                 Controller::Bot(number) => Some(number),
-                Controller::Human => None,
+                Controller::Human | Controller::Remote(_) => None,
             })
             .collect()
     }
@@ -213,6 +462,7 @@ impl LocalGame {
         let character = match controller {
             Controller::Human => self.game.add_local_member(Self::human_uuid()?, team)?,
             Controller::Bot(_) => self.game.add_bot(team)?,
+            Controller::Remote(_) => return Err(GameError::CharacterNotFound),
         };
 
         if let Some(participant) = self
@@ -243,6 +493,55 @@ impl LocalGame {
             let _ = self.game.kick_member(character);
         }
         Ok(())
+    }
+
+    /// Позиция участника в последовательности ходов (с нуля): индекс
+    /// его первого персонажа в порядке ходов движка.
+    pub fn turn_position(&self, participant_id: ParticipantId) -> Option<usize> {
+        self.participants
+            .iter()
+            .find(|participant| participant.id == participant_id)?
+            .characters
+            .iter()
+            .find_map(|character| self.game.characters().get_index_of(character))
+    }
+
+    /// Персонаж, занимающий позицию `position` в последовательности ходов.
+    pub fn character_at_turn_position(&self, position: usize) -> Option<CharacterId> {
+        self.game
+            .characters()
+            .get_index(position)
+            .map(|(id, _)| *id)
+    }
+
+    /// Меняет участника местами с тем, кто стоит на позиции
+    /// `target_position` (с нуля) в последовательности ходов. Менять
+    /// порядок можно только до старта партии.
+    pub fn swap_turn_position(
+        &mut self,
+        participant_id: ParticipantId,
+        target_position: usize,
+    ) -> Result<(), GameError> {
+        self.enter_edit_mode();
+        if self.game.is_started() {
+            return Err(GameError::GameAlreadyStarted);
+        }
+        if self.turn_position(participant_id) == Some(target_position) {
+            return Ok(());
+        }
+        let a = self
+            .participants
+            .iter()
+            .find(|participant| participant.id == participant_id)
+            .and_then(|participant| participant.characters.first().copied())
+            .ok_or(GameError::CharacterNotFound)?;
+        let b = self
+            .game
+            .characters()
+            .get_index(target_position)
+            .map(|(id, _)| *id)
+            .ok_or(GameError::CharacterNotFound)?;
+        self.game.swap_turn_order(a, b)
     }
 
     /// Removes one character from a participant. Not exposed by the lobby UI.
@@ -299,10 +598,15 @@ impl LocalGame {
         if self.participants[index].controller == controller {
             return Ok(());
         }
+        // Сетевые места не назначаются локально: источник истины — сервер.
+        if let Controller::Remote(_) = controller {
+            return Ok(());
+        }
 
         let member = match controller {
             Controller::Human => MemberId::Player(Self::human_uuid()?),
             Controller::Bot(_) => MemberId::Bot,
+            Controller::Remote(_) => return Ok(()),
         };
 
         let characters = self.participants[index].characters.clone();
@@ -333,6 +637,34 @@ impl LocalGame {
             .iter()
             .find(|participant| participant.id == participant_id)
             .map(|participant| participant.controller)
+    }
+
+    /// Ключ контроллера онлайн-места для селектора в панели участников:
+    /// `player{N}` для аккаунтов и `bot{N}` для ботов — как в офлайне,
+    /// чтобы место можно было передать конкретному боту с номером.
+    pub fn seat_controller_key(&self, participant_id: ParticipantId) -> String {
+        match self.participant_controller(participant_id) {
+            Some(Controller::Bot(number)) => format!("bot{number}"),
+            Some(Controller::Human) => match self.me {
+                Some(me) => format!("player{}", me.get()),
+                None => String::new(),
+            },
+            Some(Controller::Remote(id)) => format!("player{id}"),
+            None => String::new(),
+        }
+    }
+
+    /// Номера ботов для селектора онлайн-места: занятые плюс наименьший
+    /// свободный, чтобы список не рос при каждом выборе (как офлайн-вариант
+    /// [`Self::controller_options`], но без локального игрока).
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn seat_bot_options(&self) -> Vec<u8> {
+        let mut numbers = self.used_bot_numbers();
+        numbers.insert(Self::lowest_free_bot_number(&numbers));
+        numbers.into_iter().collect()
     }
 
     pub fn participant_team(&self, participant_id: ParticipantId) -> Option<TeamId> {
@@ -395,6 +727,47 @@ impl LocalGame {
             self.game.change_team(character, team)?;
         }
         Ok(())
+    }
+
+    /// Снимок лобби для сервера: по нему комната воссоздаётся при
+    /// переключении Оффлайн → Онлайн, чтобы стол (доска, правила, участники,
+    /// команды) не перестраивался. Первое человеческое место — место
+    /// создателя, остальные — локальные игроки горячего сиденья.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn lobby_setup(&self) -> LobbySetup {
+        let size = self.game.board().size();
+        let mut my_team = None;
+        let mut seats = Vec::new();
+        for participant in &self.participants {
+            let Some(team) = self.participant_team(participant.id) else {
+                continue;
+            };
+            if my_team.is_none() && participant.controller == Controller::Human {
+                my_team = Some(team.get());
+                continue;
+            }
+            let (bot, label) = match participant.controller {
+                Controller::Bot(number) => (true, number),
+                _ => (false, 0),
+            };
+            seats.push(LobbySeat {
+                bot,
+                label,
+                team: team.get(),
+            });
+        }
+        LobbySetup {
+            width: size.width().get(),
+            height: size.height().get(),
+            automatic: self.automatic_distribution,
+            lossless: self.lossless_explosions(),
+            radius_sq: self.safe_radius(),
+            my_team,
+            seats,
+        }
     }
 
     // --- match settings ---------------------------------------------------
@@ -483,27 +856,33 @@ impl LocalGame {
     }
 
     pub fn is_human_turn(&self) -> bool {
-        self.phase == GamePhase::Playing
-            && self.current_character().is_some()
-            && !self.current_is_bot()
+        if self.phase != GamePhase::Playing || self.current_character().is_none() {
+            return false;
+        }
+        match self.me {
+            // В онлайн-комнате ход наш, только если сервер назначил очередь
+            // на наше место (удалённые места и боты чужие).
+            Some(me) => self
+                .current_character()
+                .and_then(|character| self.game.characters().get(&character))
+                .is_some_and(|data| data.controller == MemberId::Player(me)),
+            None => !self.current_is_bot(),
+        }
+    }
+
+    /// Готовность собственного места в онлайн-комнате; офлайн — `None`.
+    pub fn own_ready(&self) -> Option<bool> {
+        self.me?;
+        self.participants
+            .iter()
+            .find(|participant| participant.controller == Controller::Human)
+            .and_then(|participant| participant.ready)
     }
 
     pub fn current_team(&self) -> Option<TeamId> {
         self.current_character()
             .and_then(|character| self.game.characters().get(&character))
             .map(|data| data.team_id)
-    }
-
-    pub fn character_participant(&self, character: CharacterId) -> Option<(usize, Controller)> {
-        self.participants
-            .iter()
-            .enumerate()
-            .find_map(|(index, participant)| {
-                participant
-                    .characters
-                    .contains(&character)
-                    .then_some((index + 1, participant.controller))
-            })
     }
 
     pub fn character_participant_id(&self, character: CharacterId) -> Option<ParticipantId> {
@@ -571,11 +950,41 @@ impl LocalGame {
     }
 
     pub fn can_surrender(&self) -> bool {
-        !self.exploding
-            && self.is_human_turn()
-            && self
-                .current_character()
-                .is_some_and(|character| !self.is_eliminated(character))
+        !self.exploding && self.surrender_character().is_some()
+    }
+
+    /// Есть ли у игрока своё место за играющей партией: у наблюдателя
+    /// (например, два бота друг против друга) кнопки сдачи нет вовсе.
+    /// В отличие от [`Self::can_surrender`] не зависит от анимации взрывов,
+    /// поэтому видимость кнопки не мерцает при каждом ходе.
+    pub fn has_playable_seat(&self) -> bool {
+        self.phase == GamePhase::Playing && self.surrender_character().is_some()
+    }
+
+    /// Место, которым игрок сдаётся: своим ходом — текущий персонаж, иначе —
+    /// первое живое место под нашим контролем (онлайн — наше сетевое место,
+    /// офлайн — первый человек за столом hot-seat).
+    pub fn surrender_character(&self) -> Option<CharacterId> {
+        if self.phase != GamePhase::Playing {
+            return None;
+        }
+        if self.is_human_turn() {
+            if let Some(character) = self.current_character() {
+                if !self.is_eliminated(character) {
+                    return Some(character);
+                }
+            }
+        }
+        self.participants
+            .iter()
+            .filter(|participant| participant.controller == Controller::Human)
+            .find_map(|participant| {
+                participant
+                    .characters
+                    .iter()
+                    .find(|character| !self.is_eliminated(**character))
+            })
+            .copied()
     }
 
     /// A legal target for the current human seat's next action.
@@ -615,6 +1024,13 @@ impl LocalGame {
         self.begin_bot_turn()
     }
 
+    /// Переигровка завершённой партии: чистая доска и статистика, тот же
+    /// состав участников. Работает только из Finished, иначе — no-op.
+    pub fn rematch(&mut self) -> Result<(), GameError> {
+        self.enter_edit_mode();
+        Ok(())
+    }
+
     /// Ход живого участника: применяет изменение клетки и переходит в
     /// режим пошаговой анимации взрывов (см. [`Self::animation_step`]).
     /// Во время анимации новые ходы игнорируются.
@@ -626,6 +1042,12 @@ impl LocalGame {
         let before = self.cell_values();
         self.game
             .start_move(character, pos, mode == MoveMode::Increase)?;
+        // Предсказание: этот же шаг вернётся с сервера и вырежется из реплея.
+        self.predicted = Some(ReplayStep::Move {
+            member: character,
+            pos,
+            increase: mode == MoveMode::Increase,
+        });
         self.begin_animation_burst();
         self.snapshot_deltas(&before);
         self.exploding = true;
@@ -638,19 +1060,42 @@ impl LocalGame {
         }
         let character = self.require_human_turn()?;
         let winner = self.game.skip(character)?;
+        self.predicted = Some(ReplayStep::Skip { member: character });
         self.settle(winner);
         self.begin_bot_turn()?;
         Ok(())
     }
 
+    /// Сдача. Сдаться можно в любой момент партии, даже не своим ходом
+    /// (место выбирает [`Self::surrender_character`]).
     pub fn surrender(&mut self) -> Result<(), GameError> {
         if self.exploding {
             return Ok(());
         }
-        let character = self.require_human_turn()?;
+        let Some(character) = self.surrender_character() else {
+            return Err(GameError::GameNotStarted);
+        };
         let winner = self.game.surrender(character)?;
+        self.predicted = Some(ReplayStep::Surrender { member: character });
         self.settle(winner);
         self.begin_bot_turn()?;
+        Ok(())
+    }
+
+    /// Принудительное завершение партии администратором: победителя
+    /// определяет движок по текущей расстановке, доска сохраняется
+    /// на экране результата. Идущая анимация взрывов обрывается: партия
+    /// окончена, кадры не доигрываются.
+    pub fn end_game(&mut self) -> Result<(), GameError> {
+        if self.phase != GamePhase::Playing {
+            return Err(GameError::GameNotStarted);
+        }
+        let winner = self.game.end_game()?;
+        self.exploding = false;
+        self.replay.clear();
+        self.predicted = None;
+        self.reset_animation();
+        self.settle(Some(winner));
         Ok(())
     }
 
@@ -683,13 +1128,29 @@ impl LocalGame {
         self.exploding = false;
         let winner = self.game.finish_move()?;
         self.settle(winner);
-        self.begin_bot_turn()?;
+        // Доигрываем очередь серверного реплея, а ботов — только когда
+        // реплей иссяк: их ходы в онлайне предсказываются локально.
+        if !self.replay.is_empty() {
+            self.begin_replay_step()?;
+        } else {
+            self.begin_bot_turn()?;
+        }
         Ok(self.exploding)
     }
 
     /// Ход доигрывается взрывами: ввод заблокирован до конца анимации.
     pub fn is_animating(&self) -> bool {
         self.exploding
+    }
+
+    /// Водяной знак последнего принятого снапшота комнаты: сетевой
+    /// клиент отбрасывает устаревшие снапшоты по нему.
+    #[cfg_attr(
+        not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+        allow(dead_code)
+    )]
+    pub fn sync_seq(&self) -> u64 {
+        self.sync_seq
     }
 
     pub fn reset(&mut self) {
@@ -808,6 +1269,8 @@ impl LocalGame {
                             index: index + 1,
                             controller: participant.controller,
                             characters,
+                            name: participant.name.clone(),
+                            ready: participant.ready,
                             wins,
                             losses,
                             moves,
@@ -923,13 +1386,65 @@ impl LocalGame {
         Ok(())
     }
 
+    /// Доигрывает очередь серверного реплея до первого хода со взрывами:
+    /// мгновенные шаги (старт, пропуск, сдача) применяются подряд, ход
+    /// клетки переводит партию в режим анимации — волна за волной, как
+    /// локальный ход. Шаги уже проверены в [`Self::start_replay`], поэтому
+    /// ошибки движка здесь невозможны.
+    fn begin_replay_step(&mut self) -> Result<(), GameError> {
+        while !self.exploding && !self.replay.is_empty() {
+            let step = self.replay.remove(0);
+            match step {
+                ReplayStep::Start { automatic } => {
+                    self.game.start(automatic)?;
+                    self.phase = GamePhase::Playing;
+                    self.winner = None;
+                    self.reset_animation();
+                }
+                ReplayStep::Move {
+                    member,
+                    pos,
+                    increase,
+                } => {
+                    let before = self.cell_values();
+                    self.game.start_move(member, pos, increase)?;
+                    self.begin_animation_burst();
+                    self.snapshot_deltas(&before);
+                    self.exploding = true;
+                }
+                ReplayStep::Skip { member } => {
+                    let winner = self.game.skip(member)?;
+                    self.settle(winner);
+                }
+                ReplayStep::Surrender { member } => {
+                    let winner = self.game.surrender(member)?;
+                    self.settle(winner);
+                }
+            }
+        }
+        if self.replay.is_empty() {
+            // Реплей иссяк: локальная партия догнала сервер, дальше боты
+            // (если ход опять их) предсказываются локально.
+            self.sync_seq = self.replay_seq;
+            self.replay_seq = 0;
+            self.begin_bot_turn()?;
+        } else if self.phase != GamePhase::Playing {
+            // Очередь не пуста, но партия закончилась: следующих ходов
+            // не будет, хвост реплея не имеет смысла.
+            self.sync_seq = self.replay_seq;
+            self.replay_seq = 0;
+            self.replay.clear();
+        }
+        Ok(())
+    }
+
     /// Фиксирует результат завершившегося хода: победителя или конец
     /// партии.
     fn settle(&mut self, winner: Option<TeamId>) {
         if let Some(team) = winner {
             self.finish(team);
         } else if !self.game.is_started() {
-            let team = self.winner_from_stats();
+            let team = Self::winner_from_stats(&self.game);
             self.phase = GamePhase::Finished;
             self.winner = team;
         }
@@ -963,9 +1478,9 @@ impl LocalGame {
         self.winner = Some(team);
     }
 
-    fn winner_from_stats(&self) -> Option<TeamId> {
-        self.game
-            .characters()
+    /// Команда-победитель по статистике завершившегося матча.
+    fn winner_from_stats(game: &Game) -> Option<TeamId> {
+        game.characters()
             .iter()
             .find_map(|(&_character, data)| (data.stats.wins > 0).then_some(data.team_id))
     }
@@ -1006,6 +1521,10 @@ pub struct TeamParticipantView {
     pub index: usize,
     pub controller: Controller,
     pub characters: Vec<CharacterId>,
+    /// Сетевое имя участника; локально — `None`.
+    pub name: Option<String>,
+    /// Готовность к старту сетевой партии; локально — `None`.
+    pub ready: Option<bool>,
     pub wins: u16,
     pub losses: u16,
     pub moves: u16,
@@ -1024,6 +1543,34 @@ pub struct TeamView {
     pub lost: bool,
 }
 
+/// Игрок онлайн-комнаты для панели игроков над списком команд.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+    allow(dead_code)
+)]
+pub struct RoomPlayer {
+    pub id: u32,
+    pub name: Option<String>,
+    pub ready: bool,
+    pub admin: bool,
+}
+
+/// Подключение к серверной комнате. Токен копируется сюда при входе,
+/// чтобы порождённые сетевые задачи не зависели от реактивного контекста.
+/// На native поля читаются только сетевым клиентом (wasm).
+#[derive(Clone, Debug)]
+#[cfg_attr(
+    not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
+    allow(dead_code)
+)]
+pub struct NetRoom {
+    pub id: RoomId,
+    pub me: Uuid,
+    pub token: String,
+    pub is_admin: bool,
+}
+
 /// Reactive handle shared by the game page, the team panels and the lobby.
 #[derive(Clone, Copy)]
 pub struct GameSession {
@@ -1032,6 +1579,18 @@ pub struct GameSession {
     pub mode: RwSignal<MoveMode>,
     /// Visual quarter-turns of the board, clockwise.
     pub rotation: RwSignal<u8>,
+    /// Текущая сетевая комната; `None` — партия идёт офлайн.
+    pub room: RwSignal<Option<NetRoom>>,
+    /// Последняя сетевая ошибка (показывается тостом на странице игры).
+    pub net_error: RwSignal<Option<NetError>>,
+    /// Сетевой запрос в полёте: блокирует дублирующиеся действия.
+    pub net_busy: RwSignal<bool>,
+    /// Поколение цикла опроса: меняется при смене комнаты, чтобы старые
+    /// таймеры погасли и не плодили дублей цепочки.
+    pub poll_generation: RwSignal<u64>,
+    /// Снапшот, пришедший во время анимации взрывов: применяется, как
+    /// только ход доиграется, чтобы волны не обрывались одиночным флешем.
+    pub pending_snapshot: RwSignal<Option<Box<RoomStateResponse>>>,
 }
 
 impl GameSession {
@@ -1041,6 +1600,11 @@ impl GameSession {
             error: RwSignal::new(None),
             mode: RwSignal::new(MoveMode::Increase),
             rotation: RwSignal::new(0),
+            room: RwSignal::new(None),
+            net_error: RwSignal::new(None),
+            net_busy: RwSignal::new(false),
+            poll_generation: RwSignal::new(0),
+            pending_snapshot: RwSignal::new(None),
         };
         provide_context(session);
         session
@@ -1074,6 +1638,8 @@ impl GameSession {
 mod tests {
     use super::*;
     use std::num::NonZeroU8;
+
+    use forup_core::api::network::RoomMode;
 
     fn started() -> LocalGame {
         let mut game = LocalGame::new();
@@ -1162,6 +1728,105 @@ mod tests {
                 .iter()
                 .all(|participant| participant.id != human)
         );
+    }
+
+    #[test]
+    fn turn_order_can_be_swapped_before_start() {
+        let mut game = LocalGame::new();
+        // Третий участник нужен, чтобы проверить переустановку позиций 1..3.
+        game.add_bot().unwrap();
+        let ids: Vec<ParticipantId> = game.participants.iter().map(|p| p.id).collect();
+        assert_eq!(ids.len(), 3);
+        // Стартовый порядок повторяет список участников.
+        assert_eq!(game.turn_position(ids[0]), Some(0));
+        assert_eq!(game.turn_position(ids[1]), Some(1));
+        assert_eq!(game.turn_position(ids[2]), Some(2));
+
+        // Игрок 2 меняется местами с игроком 3: тот, кто стоял третьим,
+        // становится вторым.
+        game.swap_turn_position(ids[1], 2).unwrap();
+        assert_eq!(game.turn_position(ids[1]), Some(2));
+        assert_eq!(game.turn_position(ids[2]), Some(1));
+        assert_eq!(game.turn_position(ids[0]), Some(0));
+
+        // Свой номер — no-op.
+        game.swap_turn_position(ids[2], 1).unwrap();
+        assert_eq!(game.turn_position(ids[2]), Some(1));
+
+        game.ready().unwrap();
+        // После старта порядок зафиксирован и не пересортировывается.
+        assert_eq!(game.turn_position(ids[0]), Some(0));
+        assert_eq!(game.turn_position(ids[1]), Some(2));
+        assert_eq!(game.turn_position(ids[2]), Some(1));
+        assert_eq!(
+            game.swap_turn_position(ids[1], 0),
+            Err(GameError::GameAlreadyStarted)
+        );
+    }
+
+    #[test]
+    fn turn_order_swap_updates_an_adopted_snapshot() {
+        let me = Uuid::new(1).unwrap();
+        let guest = Uuid::new(2).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        room.join(guest, room.next_team_id()).unwrap();
+        let ids: Vec<CharacterId> = room.game().characters().keys().copied().collect();
+
+        let mut state = LocalGame::from_room(&room, me, &HashMap::new());
+        assert_eq!(state.turn_position(u32::from(ids[0].get())), Some(0));
+        assert_eq!(state.turn_position(u32::from(ids[1].get())), Some(1));
+
+        // Админ меняет порядок ходов: сервер отдаёт новый снапшот.
+        room.swap_turn_order(me, ids[0], ids[1]).unwrap();
+        let next = LocalGame::from_room(&room, me, &HashMap::new());
+
+        // Порядок — часть состояния партии: снапшот не равен прежнему
+        // состоянию, поэтому ветка «предсказание подтвердилось» его не съест.
+        assert!(state.game != next.game);
+
+        // Путь absorb применяет новый порядок — селекторы позиций
+        // обновятся после ответа сервера.
+        state.absorb(next);
+        assert_eq!(state.turn_position(u32::from(ids[0].get())), Some(1));
+        assert_eq!(state.turn_position(u32::from(ids[1].get())), Some(0));
+    }
+
+    #[test]
+    fn admin_end_game_finishes_the_match() {
+        let mut game = LocalGame::new();
+        game.ready().unwrap();
+        assert_eq!(game.phase, GamePhase::Playing);
+        assert!(game.has_playable_seat());
+
+        game.end_game().unwrap();
+
+        assert_eq!(game.phase, GamePhase::Finished);
+        assert!(game.winner.is_some());
+        // Повторное завершение уже законченной партии отклоняется.
+        assert_eq!(game.end_game(), Err(GameError::GameNotStarted));
+    }
+
+    #[test]
+    fn bot_only_match_has_no_playable_seat() {
+        let mut game = LocalGame::new();
+        let human = game
+            .participants
+            .iter()
+            .find(|participant| participant.controller == Controller::Human)
+            .map(|participant| participant.id)
+            .unwrap();
+        game.set_participant_controller(human, Controller::Bot(3))
+            .unwrap();
+        game.ready().unwrap();
+
+        // Два бота друг против друга: местная сдача недоступна, но
+        // администратор может завершить партию принудительно.
+        assert_eq!(game.phase, GamePhase::Playing);
+        assert!(!game.has_playable_seat());
+        assert!(!game.can_surrender());
+
+        game.end_game().unwrap();
+        assert_eq!(game.phase, GamePhase::Finished);
     }
 
     #[test]
@@ -1453,5 +2118,362 @@ mod tests {
 
         assert_eq!(game.phase, GamePhase::Finished);
         assert!(game.winner.is_some());
+    }
+
+    #[test]
+    fn surrender_works_out_of_turn_for_our_own_seat() {
+        let owner = Uuid::new(11).unwrap();
+        let guest = Uuid::new(12).unwrap();
+        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let team = room.next_team_id();
+        room.join(guest, team).unwrap();
+        // Третья команда — бот: после сдачи гостя партия продолжается.
+        room.add_bot(owner, room.next_team_id()).unwrap();
+        room.set_ready(owner, true).unwrap();
+        room.set_ready(guest, true).unwrap();
+        assert!(room.game().is_started());
+
+        let mut game = LocalGame::from_room(&room, guest, &HashMap::new());
+        assert_eq!(game.phase, GamePhase::Playing);
+        // Сейчас ход владельца, а не наш.
+        assert!(!game.is_human_turn());
+        assert!(game.can_surrender());
+
+        game.surrender().unwrap();
+
+        // Своё место выбывает, ход остаётся владельцу, партия продолжается.
+        assert_eq!(game.phase, GamePhase::Playing);
+        let guest_seat = game
+            .participants
+            .iter()
+            .find(|participant| participant.controller == Controller::Human)
+            .unwrap()
+            .characters[0];
+        assert!(game.is_eliminated(guest_seat));
+        assert!(!game.is_human_turn());
+
+        // Тот же результат у сервера: предсказание совпало.
+        room.surrender(guest, guest_seat).unwrap();
+        let server = LocalGame::from_room(&room, guest, &HashMap::new());
+        assert_eq!(game.game, server.game);
+    }
+
+    #[test]
+    fn rematch_returns_the_finished_match_to_the_lobby() {
+        let mut game = started();
+        game.surrender().unwrap();
+        assert_eq!(game.phase, GamePhase::Finished);
+
+        let participants = game.participants.clone();
+        game.rematch().unwrap();
+
+        // Чистое лобби: доска обнулена, статистика сброшена, тот же состав.
+        assert_eq!(game.phase, GamePhase::Lobby);
+        assert!(game.winner.is_none());
+        assert_eq!(game.participants, participants);
+        assert!(
+            game.game
+                .board()
+                .iter()
+                .all(|(_, cell)| cell.value == 0 && cell.owner.is_none())
+        );
+        assert!(
+            game.game
+                .characters()
+                .values()
+                .all(|character| character.stats.wins == 0 && character.stats.losses == 0)
+        );
+
+        // Новая партия стартует той же кнопкой готовности.
+        game.ready().unwrap();
+        assert_eq!(game.phase, GamePhase::Playing);
+
+        // Из идущей партии «Заново» недоступно: no-op без ошибки.
+        game.rematch().unwrap();
+        assert_eq!(game.phase, GamePhase::Playing);
+    }
+
+    #[test]
+    fn from_room_builds_participants_from_the_snapshot() {
+        let me = Uuid::new(7).unwrap();
+        let guest = Uuid::new(9).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let team = room.next_team_id();
+        room.join(guest, team).unwrap();
+        room.set_ready(guest, true).unwrap();
+
+        let mut names = HashMap::new();
+        names.insert(7u32, "Alice".to_string());
+        names.insert(9u32, "Robin".to_string());
+
+        let game = LocalGame::from_room(&room, me, &names);
+        assert_eq!(game.me, Some(me));
+        assert_eq!(game.phase, GamePhase::Lobby);
+
+        let own = game
+            .participants
+            .iter()
+            .find(|participant| participant.controller == Controller::Human)
+            .unwrap();
+        assert_eq!(own.ready, Some(false));
+        assert_eq!(own.name.as_deref(), Some("Alice"));
+
+        let remote = game
+            .participants
+            .iter()
+            .find(|participant| matches!(participant.controller, Controller::Remote(id) if id == 9))
+            .unwrap();
+        assert_eq!(remote.name.as_deref(), Some("Robin"));
+        assert_eq!(remote.ready, Some(true));
+
+        assert_eq!(game.players.len(), 2);
+        assert_eq!(game.players[0].id, 7);
+        assert_eq!(game.players[0].name.as_deref(), Some("Alice"));
+        assert!(!game.players[0].ready);
+        assert!(game.players[0].admin);
+        assert_eq!(game.players[1].id, 9);
+        assert_eq!(game.players[1].name.as_deref(), Some("Robin"));
+        assert!(game.players[1].ready);
+        assert!(!game.players[1].admin);
+    }
+
+    #[test]
+    fn seat_controller_keys_identify_each_seat() {
+        let me = Uuid::new(7).unwrap();
+        let guest = Uuid::new(9).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        room.join(guest, room.next_team_id()).unwrap();
+        let bot = room.add_bot(me, room.next_team_id()).unwrap();
+
+        let game = LocalGame::from_room(&room, me, &HashMap::new());
+
+        assert_eq!(game.seat_controller_key(u32::from(bot.get())), "bot1");
+        for (character, data) in room.game().characters() {
+            let key = game.seat_controller_key(u32::from(character.get()));
+            match data.controller {
+                MemberId::Player(player) if player == me => {
+                    assert_eq!(key, "player7");
+                }
+                MemberId::Player(player) if player == guest => {
+                    assert_eq!(key, "player9");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(game.seat_controller_key(9999), String::new());
+    }
+
+    #[test]
+    fn absorb_animates_remote_moves() {
+        let me = Uuid::new(7).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let team = room.next_team_id();
+        room.add_bot(me, team).unwrap();
+        // Готовность единственного игрока автостартует партию на сервере.
+        room.set_ready(me, true).unwrap();
+        assert!(room.game().is_started());
+
+        let mut game = LocalGame::from_room(&room, me, &HashMap::new());
+        assert_eq!(game.phase, GamePhase::Playing);
+        assert!(game.is_human_turn());
+
+        // Находим свою клетку и ходим через серверную комнату.
+        let pos = game
+            .game
+            .board()
+            .iter()
+            .find(|(_, cell)| cell.owner == game.current_team())
+            .map(|(pos, _)| pos)
+            .expect("the automatic distribution gives every team one cell");
+        let character = game.current_character().unwrap();
+        room.increase(me, character, pos).unwrap();
+
+        let next = LocalGame::from_room(&room, me, &HashMap::new());
+        game.absorb(next);
+        assert_ne!(game.change_at(pos), 0);
+    }
+
+    #[test]
+    fn identical_snapshots_stay_equal() {
+        let me = Uuid::new(7).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        room.join(Uuid::new(9).unwrap(), room.next_team_id())
+            .unwrap();
+        let names = HashMap::new();
+        let first = LocalGame::from_room(&room, me, &names);
+        let second = LocalGame::from_room(&room, me, &names);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn remote_moves_replay_wave_by_wave() {
+        let me = Uuid::new(7).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let team = room.next_team_id();
+        room.add_bot(me, team).unwrap();
+        // Готовность единственного игрока автостартует партию на сервере.
+        room.set_ready(me, true).unwrap();
+
+        let mut game = LocalGame::from_room(&room, me, &HashMap::new());
+        assert_eq!(game.phase, GamePhase::Playing);
+        assert!(game.is_human_turn());
+
+        // Ходим через серверную комнату (как чужой игрок) и реплеим его.
+        let pos = game
+            .game
+            .board()
+            .iter()
+            .find(|(_, cell)| cell.owner == game.current_team())
+            .map(|(pos, _)| pos)
+            .expect("the automatic distribution gives every team one cell");
+        let character = game.current_character().unwrap();
+        let seq = room.seq();
+        room.increase(me, character, pos).unwrap();
+
+        let target = LocalGame::from_room(&room, me, &HashMap::new());
+        assert!(game.start_replay(room.last_steps(), &target.game, room.seq()));
+        // Ход уже виден на доске и доигрывается волнами.
+        assert!(game.is_animating());
+        assert_ne!(game.change_at(pos), 0);
+
+        while game.animation_step().unwrap() {}
+        assert!(!game.is_animating());
+        assert_eq!(game.game, target.game);
+        assert_eq!(game.sync_seq, room.seq());
+        assert!(seq < room.seq());
+    }
+
+    #[test]
+    fn start_replay_rejects_diverging_steps() {
+        let me = Uuid::new(7).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let team = room.next_team_id();
+        room.add_bot(me, team).unwrap();
+        // Готовность единственного игрока автостартует партию на сервере.
+        room.set_ready(me, true).unwrap();
+
+        let mut game = LocalGame::from_room(&room, me, &HashMap::new());
+        let pos = current_human_cell(&game);
+        let character = game.current_character().unwrap();
+        room.increase(me, character, pos).unwrap();
+
+        let steps = room.last_steps().to_vec();
+        let target = room.game().clone();
+        assert!(game.start_replay(&steps, &target, room.seq()));
+        while game.animation_step().unwrap() {}
+
+        // Те же шаги повторно к доигранному состоянию не применимы.
+        assert!(!game.start_replay(&steps, &target, room.seq()));
+    }
+
+    #[test]
+    fn predicted_own_move_is_trimmed_from_the_replay() {
+        let me = Uuid::new(7).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let team = room.next_team_id();
+        room.add_bot(me, team).unwrap();
+        // Готовность единственного игрока автостартует партию на сервере.
+        room.set_ready(me, true).unwrap();
+
+        let mut game = LocalGame::from_room(&room, me, &HashMap::new());
+        assert!(game.is_human_turn());
+        let pos = current_human_cell(&game);
+
+        // Ходим локально (предсказание) и доигрываем его вручную без
+        // локального ответа бота — как если бы ответ сервера обгонял
+        // локальное предсказание хода бота.
+        game.make_move(pos, MoveMode::Increase).unwrap();
+        while game.game.explode_wave() {}
+        let winner = game.game.finish_move().unwrap();
+        game.settle(winner);
+        game.exploding = false;
+
+        // Сервер применяет тот же ход и доигрывает ответ бота.
+        let predicted_member = match game.predicted {
+            Some(ReplayStep::Move { member, .. }) => member,
+            other => panic!("expected a predicted move, got {other:?}"),
+        };
+        room.increase(me, predicted_member, pos).unwrap();
+        assert_eq!(room.last_steps().len(), 2);
+
+        // Реплей отрезает наш предсказанный ход и анимирует только бота.
+        assert!(game.start_replay(room.last_steps(), room.game(), room.seq()));
+        assert!(game.is_animating());
+        while game.animation_step().unwrap() {}
+        assert!(!game.is_animating());
+        assert_eq!(game.game, *room.game());
+        assert_eq!(game.sync_seq, room.seq());
+    }
+
+    #[test]
+    fn detach_turns_network_players_into_local() {
+        let me = Uuid::new(7).unwrap();
+        let guest = Uuid::new(9).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let team = room.next_team_id();
+        room.join(guest, team).unwrap();
+        room.set_ready(guest, true).unwrap();
+        let names = HashMap::new();
+
+        let mut game = LocalGame::from_room(&room, me, &names);
+        assert!(game.players.len() == 2);
+
+        game.detach();
+
+        assert!(game.me.is_none());
+        assert!(game.players.is_empty());
+        assert!(game.replay.is_empty());
+        assert_eq!(game.sync_seq, 0);
+        for participant in &game.participants {
+            assert!(matches!(
+                participant.controller,
+                Controller::Human | Controller::Bot(_)
+            ));
+            assert!(participant.name.is_none());
+            assert!(participant.ready.is_none());
+        }
+    }
+
+    #[test]
+    fn lobby_setup_round_trips_the_lobby() {
+        let mut game = LocalGame::new();
+        game.add_bot().unwrap();
+        let (w, h) = (NonZeroU8::new(5).unwrap(), NonZeroU8::new(7).unwrap());
+        game.set_board_size(BoardCode::from_size(w, h).unwrap())
+            .unwrap();
+
+        let setup = game.lobby_setup();
+        assert_eq!(setup.my_team, Some(1));
+        assert_eq!(setup.width, 5);
+        assert_eq!(setup.height, 7);
+        assert_eq!(setup.seats.len(), 2);
+
+        // Восстанавливаем комнату по снимку и сравниваем).
+        let me = Uuid::new(7).unwrap();
+        let mut room = Room::new(me, RoomMode::Online { open: true });
+        room.apply_lobby_setup(me, &setup).unwrap();
+
+        let restored = LocalGame::from_room(&room, me, &HashMap::new());
+        assert_eq!(restored.board_size(), BoardCode::from_size(w, h).unwrap());
+        let controllers: Vec<Controller> = restored
+            .participants
+            .iter()
+            .map(|participant| participant.controller)
+            .collect();
+        assert_eq!(
+            controllers,
+            vec![Controller::Human, Controller::Bot(1), Controller::Bot(2)]
+        );
+        // Бот 1 остаётся в команде 2, новый бот — в своей команде.
+        assert_eq!(restored.participant_team(2), Some(tid(2)));
+    }
+
+    #[test]
+    fn seat_bot_options_keep_the_current_bot_available() {
+        let mut game = LocalGame::new();
+        assert_eq!(game.seat_bot_options(), vec![1, 2]);
+
+        game.add_bot().unwrap();
+        assert_eq!(game.seat_bot_options(), vec![1, 2, 3]);
     }
 }

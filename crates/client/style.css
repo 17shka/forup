@@ -146,6 +146,14 @@ body {
     font-size: 15px;
 }
 
+/* Правый край баннера: переключатель режима прижат к правой стороне,
+   напротив текста хода. */
+.turn-banner__side {
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+}
+
 .visually-hidden {
     position: absolute;
     width: 1px;
@@ -451,6 +459,34 @@ body {
     color: #ef4444;
 }
 
+/* Ready button: green while not ready (press to get ready), red while
+   already ready (press again to cancel). Offline/rematch stays green. */
+.thaw-button.game-action--ready-on {
+    background-color: #16a34a;
+    color: #fff;
+}
+
+.thaw-button.game-action--ready-on:hover {
+    background-color: #15803d;
+}
+
+.thaw-button.game-action--ready-on:active {
+    background-color: #166534;
+}
+
+.thaw-button.game-action--ready-off {
+    background-color: #dc2626;
+    color: #fff;
+}
+
+.thaw-button.game-action--ready-off:hover {
+    background-color: #b91c1c;
+}
+
+.thaw-button.game-action--ready-off:active {
+    background-color: #991b1b;
+}
+
 /* Teams / lobby */
 
 .teams-panel {
@@ -569,6 +605,10 @@ body {
     min-width: 64px;
 }
 
+.thaw-select.participant-row__select--order {
+    min-width: 56px;
+}
+
 .thaw-button.participant-row__icon {
     width: 30px;
     min-width: 30px;
@@ -619,6 +659,21 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
+.thaw-slider.settings-slider {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.settings-row__size {
+    min-width: 44px;
+}
+
+.settings-row--switch {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding-top: 2px;
+}
+
 .settings-row__right {
     display: flex;
     align-items: center;
@@ -628,17 +683,6 @@ body {
 
 /* Turn status next to the action toggle */
 
-.turn-controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-}
-
-.turn-controls .turn-banner {
-    flex: 1 1 auto;
-}
 
 /* Settings drawer */
 
@@ -939,4 +983,283 @@ body {
 
 .profile-action--danger {
     color: #ef4444;
+}
+
+/* Переключатель режима комнаты (офлайн/онлайн) на странице игры */
+.room-mode {
+    display: flex;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 999px;
+    background: var(--colorNeutralBackground3);
+    box-shadow: inset 0 0 0 1px var(--colorNeutralStroke2);
+    align-self: center;
+    width: fit-content;
+}
+
+.room-mode__button {
+    padding: 8px 16px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--colorNeutralForeground3);
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.room-mode__button--active {
+    background: var(--colorNeutralBackground1);
+    color: var(--colorNeutralForeground1);
+    box-shadow: var(--shadow4, 0 1px 2px rgba(0, 0, 0, 0.08));
+}
+
+.room-mode__button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+/* Панель сетевых комнат на главной странице */
+.rooms-panel {
+    width: min(92vw, 560px);
+}
+
+.rooms-panel .thaw-card-header__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.rooms-panel__title {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.rooms-panel__actions {
+    display: flex;
+    gap: 8px;
+}
+
+.rooms-panel__error {
+    margin: 0;
+    font-size: 13px;
+    color: #ef4444;
+}
+
+.rooms-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.rooms-list__row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: var(--colorNeutralBackground3);
+}
+
+.rooms-list__id {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--colorNeutralForeground2);
+}
+
+.rooms-list__meta {
+    flex: 1;
+    font-size: 13px;
+    color: var(--colorNeutralForeground2);
+}
+
+.rooms-list__status {
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--colorNeutralForeground3);
+    background: var(--colorNeutralBackground1);
+    box-shadow: inset 0 0 0 1px var(--colorNeutralStroke2);
+    white-space: nowrap;
+}
+
+.rooms-list__status--started {
+    color: #22c55e;
+    box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.4);
+}
+
+.rooms-list__empty {
+    margin: 0;
+    font-size: 14px;
+    color: var(--colorNeutralForeground3);
+}
+
+/* Сетевые участники: имя и галочка готовности вместо селекта */
+.participant-row__name {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--colorNeutralForeground1);
+    overflow-wrap: anywhere;
+}
+
+.participant-row__ready {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #22c55e;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+/* Селектор контроллера онлайн-места в строке участника */
+.thaw-select.participant-row__select--seat {
+    min-width: 110px;
+}
+
+/* Панель игроков онлайн-комнаты над списком команд */
+.room-players {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.room-players__list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.room-players__chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--colorNeutralForeground2);
+    background: var(--colorNeutralBackground3);
+    box-shadow: inset 0 0 0 1px var(--colorNeutralStroke2);
+}
+
+.room-players__chip--admin {
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.5);
+}
+
+.room-players__ready {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    background: #22c55e;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.room-players__admin {
+    color: #3b82f6;
+    font-size: 13px;
+}
+
+/* Lossy / Lossless red-green segmented toggle */
+
+.explosion-toggle {
+    --explosion-lossy: #ef4444;
+    --explosion-lossless: #22c55e;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 999px;
+    background: var(--colorNeutralBackground3);
+    box-shadow:
+        inset 0 0 0 1px var(--colorNeutralStroke2),
+        inset 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.explosion-toggle__option {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 32px;
+    padding: 3px 12px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--colorNeutralForeground2);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition:
+        color 160ms ease,
+        background-color 160ms ease,
+        box-shadow 160ms ease,
+        transform 100ms ease;
+}
+
+.explosion-toggle__option:hover {
+    color: var(--colorNeutralForeground1);
+}
+
+.explosion-toggle__option:active {
+    transform: scale(0.95);
+}
+
+.explosion-toggle__option:focus-visible {
+    outline: 2px solid var(--colorBrandStroke1, #3b82f6);
+    outline-offset: 2px;
+}
+
+.explosion-toggle__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    transition:
+        background-color 160ms ease,
+        box-shadow 160ms ease;
+}
+
+.explosion-toggle__dot--lossy {
+    background: var(--explosion-lossy);
+}
+
+.explosion-toggle__dot--lossless {
+    background: var(--explosion-lossless);
+}
+
+.explosion-toggle__option--lossy.explosion-toggle__option--active {
+    color: #fff;
+    background: linear-gradient(135deg, #f87171, #dc2626);
+}
+
+.explosion-toggle__option--lossless.explosion-toggle__option--active {
+    color: #fff;
+    background: linear-gradient(135deg, #4ade80, #16a34a);
+}
+
+.explosion-toggle__option--active .explosion-toggle__dot {
+    background: #fff;
+}
+
+.explosion-toggle__text {
+    line-height: 1;
 }

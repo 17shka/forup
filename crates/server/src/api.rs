@@ -13,6 +13,7 @@ use forup_core::api::auth::{
     ApiError, AuthError, AuthResponse, LoginRequest, RegisterRequest, UpdateProfileRequest, UserId,
     UserResponse, UserStore, generate_token,
 };
+use forup_core::api::network::{RoomDirectory, RoomStore};
 use serde::{Serialize, de::DeserializeOwned};
 
 const BINARY: &str = "application/octet-stream";
@@ -21,15 +22,19 @@ const BINARY: &str = "application/octet-stream";
 /// in-memory sessions issued on login.
 #[derive(Clone)]
 pub struct ApiState {
-    users: UserStore,
+    pub(crate) users: UserStore,
     sessions: Arc<Mutex<HashMap<String, u32>>>,
+    pub(crate) rooms: Arc<Mutex<RoomDirectory>>,
+    pub(crate) room_store: RoomStore,
 }
 
 impl ApiState {
-    pub fn new(users: UserStore) -> Self {
+    pub fn new(users: UserStore, rooms: Arc<Mutex<RoomDirectory>>, room_store: RoomStore) -> Self {
         Self {
             users,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            rooms,
+            room_store,
         }
     }
 
@@ -71,6 +76,7 @@ where
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
         .route("/api/auth/profile", patch(update_profile))
+        .merge(crate::rooms::router(state.clone()))
         .layer(Extension(state))
 }
 
@@ -167,7 +173,7 @@ async fn update_profile(
     }
 }
 
-fn authenticated(state: &ApiState, headers: &HeaderMap) -> Result<UserId, Response> {
+pub(crate) fn authenticated(state: &ApiState, headers: &HeaderMap) -> Result<UserId, Response> {
     let token = bearer_token(headers)
         .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "authentication required"))?;
     state
@@ -183,7 +189,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn decode<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
+pub(crate) fn decode<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
     postcard::from_bytes(body.as_ref()).map_err(|error| {
         api_error(
             StatusCode::BAD_REQUEST,
@@ -192,7 +198,7 @@ fn decode<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
     })
 }
 
-fn encode<T: Serialize>(status: StatusCode, value: &T) -> Response {
+pub(crate) fn encode<T: Serialize>(status: StatusCode, value: &T) -> Response {
     match postcard::to_allocvec(value) {
         Ok(body) => (status, [(CONTENT_TYPE, BINARY)], body).into_response(),
         Err(error) => (

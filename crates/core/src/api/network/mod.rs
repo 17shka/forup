@@ -15,6 +15,13 @@ pub use room::{
     RoomId, RoomMode, Status,
 };
 
+mod protocol;
+pub use protocol::{
+    BoardSizeRequest, CreateRoomRequest, DistributionRequest, ExplosionRequest, LobbySeat,
+    LobbySetup, MemberRequest, MoveRequest, OpenRequest, RadiusRequest, ReadyRequest, ReplayStep,
+    RoomStateResponse, RoomSummary, RoomsResponse, SeatRequest, TeamRequest, TurnOrderRequest,
+};
+
 mod storage;
 pub use storage::{RoomStore, StorageError};
 
