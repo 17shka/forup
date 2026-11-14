@@ -52,6 +52,12 @@ fn TeamCard(team: TeamView) -> impl IntoView {
     let team_id = team.team.get();
     let cells = team.cells;
     let mass = team.mass;
+    // Команда, в которой все участники проиграли, показывается тусклее.
+    let wrap_class = if team.lost {
+        "team-card-wrap team-card-wrap--lost"
+    } else {
+        "team-card-wrap"
+    };
 
     let rows = team
         .participants
@@ -60,7 +66,7 @@ fn TeamCard(team: TeamView) -> impl IntoView {
         .collect_view();
 
     view! {
-        <div class="team-card-wrap" style=format!("--team-hue: {hue};")>
+        <div class=wrap_class style=format!("--team-hue: {hue};")>
             <Card class="team-card">
                 <CardHeader>
                     <span class="team-id-chip">"#" {team_id}</span>
@@ -83,6 +89,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
     let i18n = use_i18n();
     let session = GameSession::expect();
     let participant_id = member.id;
+    let lost = member.lost;
 
     let editable = move || session.state.with(|game| game.phase != GamePhase::Playing);
     let remove_title = Memo::new(move |_| t_string!(i18n, remove).to_string());
@@ -185,6 +192,11 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
 
     let row_class = move || {
         let mut class = String::from("participant-row");
+        // Проигравший участник показывается тусклее, чтобы сразу видно,
+        // кто выбыл.
+        if lost {
+            class.push_str(" participant-row--lost");
+        }
         let (is_current, is_next) = session.state.with(|game| {
             if game.phase != GamePhase::Playing {
                 return (false, false);

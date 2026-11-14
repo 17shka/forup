@@ -6,7 +6,7 @@ use thaw::{
     ToasterInjection,
 };
 
-use crate::components::{GameSettingsPanel, RotateBoardButton, TeamsPanel};
+use crate::components::{GameSettingsPanel, ModeCheckbox, TeamsPanel};
 use crate::game::{Controller, GamePhase, GameSession, LocalGame, MoveMode};
 use crate::i18n::*;
 use crate::settings::Settings;
@@ -40,6 +40,10 @@ fn cell_class(state: &LocalGame, pos: BoardCode) -> String {
     if let Some(cell) = state.game.board().get(pos) {
         if cell.owner.is_some() {
             class.push_str(" board-cell--owned");
+            if state.phase == GamePhase::Playing && cell.owner != state.current_team() {
+                // Ход другой команды: её клетки показываются тусклее.
+                class.push_str(" board-cell--dim");
+            }
             if cell.can_explode() {
                 class.push_str(" board-cell--charged");
             }
@@ -203,19 +207,33 @@ pub fn GamePage() -> impl IntoView {
         })
     };
 
-    let mode_class = move |target: MoveMode| {
-        let mut class = match target {
-            MoveMode::Increase => String::from("mode-action mode-action--increase"),
-            MoveMode::Decrease => String::from("mode-action mode-action--decrease"),
+    let mode_checked = Signal::derive(move || session.mode.get() == MoveMode::Increase);
+    let set_mode = SignalSetter::map(move |checked: bool| {
+        let target = if checked {
+            MoveMode::Increase
+        } else {
+            MoveMode::Decrease
         };
-        if session.mode.get() == target {
-            class.push_str(" mode-action--active");
+        // Уменьшение недоступно (нет подходящих клеток): чекбокс не выключается,
+        // как раньше была заблокирована кнопка «−Уменьшить».
+        if target == MoveMode::Decrease && !session.state.with_untracked(LocalGame::can_decrease) {
+            return;
         }
-        class
-    };
+        session.mode.set(target);
+    });
+    let mode_disabled = Signal::derive(move || {
+        session.mode.get() == MoveMode::Increase && !session.state.with(LocalGame::can_decrease)
+    });
+    let mode_label = Signal::derive(move || {
+        if session.mode.get() == MoveMode::Increase {
+            t_string!(i18n, increase).to_string()
+        } else {
+            t_string!(i18n, decrease).to_string()
+        }
+    });
 
     // A start cell is claimed with Increase by default; while one is being
-    // picked the mode buttons stay hidden, so snap the mode back here.
+    // picked the mode checkbox stays hidden, so snap the mode back here.
     Effect::new(move |previous: Option<bool>| {
         let choosing = session.state.with(|game| game.is_choosing_start_cell());
         if choosing && !previous.unwrap_or(false) {
@@ -354,37 +372,20 @@ pub fn GamePage() -> impl IntoView {
             <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
                 <div class="turn-controls">
                     <Show
-                        when=move || session.state.with(|game| game.phase == GamePhase::Playing)
+                        when=move || {
+                            session.state.with(|game| {
+                                game.phase == GamePhase::Playing
+                                    && !game.is_choosing_start_cell()
+                            })
+                        }
                     >
                         <div class="mode-toggle" role="group">
-                            <Show
-                                when=move || {
-                                    !session
-                                        .state
-                                        .with(|game| game.is_choosing_start_cell())
-                                }
-                            >
-                                <Button
-                                    class=Signal::derive(move || mode_class(MoveMode::Decrease))
-                                    size=ButtonSize::Small
-                                    appearance=ButtonAppearance::Transparent
-                                    disabled=move || !session.state.with(LocalGame::can_decrease)
-                                    on_click=move |_| session.mode.set(MoveMode::Decrease)
-                                >
-                                    <span class="mode-action__icon" aria-hidden="true">"−"</span>
-                                    <span>{t!(i18n, decrease)}</span>
-                                </Button>
-                                <Button
-                                    class=Signal::derive(move || mode_class(MoveMode::Increase))
-                                    size=ButtonSize::Small
-                                    appearance=ButtonAppearance::Transparent
-                                    on_click=move |_| session.mode.set(MoveMode::Increase)
-                                >
-                                    <span class="mode-action__icon" aria-hidden="true">"＋"</span>
-                                    <span>{t!(i18n, increase)}</span>
-                                </Button>
-                            </Show>
-                            <RotateBoardButton/>
+                            <ModeCheckbox
+                                checked=mode_checked
+                                set_checked=set_mode
+                                label=mode_label
+                                disabled=mode_disabled
+                            />
                         </div>
                     </Show>
                 </div>
@@ -426,13 +427,20 @@ pub fn GamePage() -> impl IntoView {
                         class="game-action game-action--ready"
                         appearance=ButtonAppearance::Primary
                         size=ButtonSize::Medium
-                        disabled=move || !session.state.with(LocalGame::can_ready)
                         on_click=on_ready
                     >
                         <span class="game-action__icon" aria-hidden="true">"✓"</span>
                         <span class="game-action__label">{ready_label}</span>
                     </Button>
                 </Show>
+                <Button
+                    class="game-action"
+                    appearance=ButtonAppearance::Secondary
+                    on_click=move |_| session.rotate_board()
+                >
+                    <span class="game-action__icon" aria-hidden="true">"⟳"</span>
+                    <span class="game-action__label">{t!(i18n, rotate_board)}</span>
+                </Button>
             </div>
 
             <GameSettingsPanel/>

@@ -146,34 +146,6 @@ body {
     font-size: 15px;
 }
 
-.turn-banner .rotate-board {
-    flex: 0 0 auto;
-    margin-left: auto;
-}
-
-.thaw-button.rotate-board {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 30px;
-    padding: 0 10px;
-    border-radius: 999px;
-    font-size: 13px;
-    font-weight: 600;
-    line-height: 1;
-}
-
-.rotate-board__icon {
-    display: inline-block;
-    line-height: 1;
-    font-size: 17px;
-}
-
-.rotate-board__label {
-    display: inline-block;
-    line-height: 1;
-}
-
 .visually-hidden {
     position: absolute;
     width: 1px;
@@ -252,7 +224,8 @@ body {
     transition:
         transform 80ms ease,
         background-color 150ms ease,
-        box-shadow 150ms ease;
+        box-shadow 150ms ease,
+        opacity 150ms ease;
 }
 
 .board-cell__value {
@@ -271,6 +244,11 @@ body {
     background-color: hsl(var(--team-hue, 210) 68% 46%);
     filter: brightness(var(--cell-brightness, 1));
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+/* Ходить может только одна команда: клетки остальных тусклее. */
+.board-cell--dim {
+    opacity: 0.45;
 }
 
 .board-cell--charged {
@@ -384,54 +362,57 @@ body {
     box-shadow: var(--shadow4, 0 1px 2px rgba(0, 0, 0, 0.08));
 }
 
-.thaw-button.mode-action {
-    display: flex;
+.mode-checkbox {
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    min-width: 0;
+    width: 38px;
     min-height: 32px;
-    padding: 3px 12px;
     border: 0;
     border-radius: 999px;
-    background: transparent;
-    color: var(--colorNeutralForeground2);
-    font-size: 13px;
-    font-weight: 600;
-}
-
-.thaw-button.mode-action--increase {
-    color: #16a34a;
-}
-
-.thaw-button.mode-action--decrease {
-    color: #dc2626;
-}
-
-.thaw-button.mode-action:hover {
-    background-color: var(--colorNeutralBackground1Hover);
-}
-
-.thaw-button.mode-action--active.mode-action--increase {
-    background-color: #16a34a;
+    background: var(--colorNeutralBackground3);
     color: #fff;
+    font-size: 16px;
+    font-weight: 800;
+    line-height: 1;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition:
+        background-color 160ms ease,
+        transform 100ms ease,
+        opacity 160ms ease;
 }
 
-.thaw-button.mode-action--active.mode-action--decrease {
-    background-color: #dc2626;
-    color: #fff;
+.mode-checkbox:hover {
+    filter: brightness(1.08);
 }
 
-.thaw-button.mode-action--active:hover {
-    filter: brightness(1.05);
+.mode-checkbox:active {
+    transform: scale(0.92);
 }
 
-.thaw-button.mode-action:disabled {
+.mode-checkbox:focus-visible {
+    outline: 2px solid var(--colorBrandStroke1, #3b82f6);
+    outline-offset: 2px;
+}
+
+.mode-checkbox:disabled {
     opacity: 0.4;
+    cursor: default;
 }
 
-.mode-action__icon {
-    font-size: 15px;
+/* Включён — зелёный "+", выключен — красный "−". */
+.mode-checkbox--on {
+    background: linear-gradient(135deg, #4ade80, #16a34a);
+}
+
+.mode-checkbox--off {
+    background: linear-gradient(135deg, #f87171, #dc2626);
+}
+
+.mode-checkbox__sign {
+    display: inline-block;
+    font-size: 18px;
     line-height: 1;
 }
 
@@ -516,6 +497,12 @@ body {
     background: hsl(var(--team-hue, 210) 68% 46% / 0.1);
 }
 
+/* Команда, в которой все участники проиграли, тоже тусклее. */
+.team-card-wrap--lost {
+    opacity: 0.6;
+    filter: saturate(0.3);
+}
+
 .team-card__rows {
     display: flex;
     flex-direction: column;
@@ -559,6 +546,12 @@ body {
 .participant-row--current {
     background: hsl(var(--team-hue, 210) 68% 46% / 0.42);
     box-shadow: inset 0 0 0 2px hsl(var(--team-hue, 210) 68% 46%);
+}
+
+/* Проигравший участник: карточка тусклее, чтобы сразу видно, кто выбыл. */
+.participant-row--lost {
+    opacity: 0.55;
+    filter: saturate(0.35);
 }
 
 .participant-row__controls {
@@ -626,116 +619,11 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-.settings-row__size {
-    min-width: 44px;
-}
-
-.settings-row .rotate-board {
-    flex: 0 0 auto;
-}
-
-.thaw-slider.settings-slider {
-    flex: 1 1 auto;
-    min-width: 0;
-}
-
-.settings-row--switch {
-    flex-wrap: wrap;
-    row-gap: 8px;
-    padding-top: 2px;
-}
-
 .settings-row__right {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-left: auto;
-}
-
-/* Lossy / Lossless red-green segmented toggle */
-
-.explosion-toggle {
-    --explosion-lossy: #ef4444;
-    --explosion-lossless: #22c55e;
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    padding: 3px;
-    border-radius: 999px;
-    background: var(--colorNeutralBackground3);
-    box-shadow:
-        inset 0 0 0 1px var(--colorNeutralStroke2),
-        inset 0 1px 2px rgba(0, 0, 0, 0.12);
-}
-
-.explosion-toggle__option {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    min-height: 32px;
-    padding: 3px 12px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--colorNeutralForeground2);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-    transition:
-        color 160ms ease,
-        background-color 160ms ease,
-        box-shadow 160ms ease,
-        transform 100ms ease;
-}
-
-.explosion-toggle__option:hover {
-    color: var(--colorNeutralForeground1);
-}
-
-.explosion-toggle__option:active {
-    transform: scale(0.95);
-}
-
-.explosion-toggle__option:focus-visible {
-    outline: 2px solid var(--colorBrandStroke1, #3b82f6);
-    outline-offset: 2px;
-}
-
-.explosion-toggle__dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    transition:
-        background-color 160ms ease,
-        box-shadow 160ms ease;
-}
-
-.explosion-toggle__dot--lossy {
-    background: var(--explosion-lossy);
-}
-
-.explosion-toggle__dot--lossless {
-    background: var(--explosion-lossless);
-}
-
-.explosion-toggle__option--lossy.explosion-toggle__option--active {
-    color: #fff;
-    background: linear-gradient(135deg, #f87171, #dc2626);
-}
-
-.explosion-toggle__option--lossless.explosion-toggle__option--active {
-    color: #fff;
-    background: linear-gradient(135deg, #4ade80, #16a34a);
-}
-
-.explosion-toggle__option--active .explosion-toggle__dot {
-    background: #fff;
-}
-
-.explosion-toggle__text {
-    line-height: 1;
 }
 
 /* Turn status next to the action toggle */

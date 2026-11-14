@@ -540,14 +540,12 @@ impl LocalGame {
         })
     }
 
+    /// Старт требует минимум две разные команды, в каждой есть участник
+    /// (бот или игрок — не важно).
     pub fn can_start(&self) -> bool {
         self.phase != GamePhase::Playing
             && self.game.characters().len() >= 2
             && self.teams().len() >= 2
-            && self
-                .participants
-                .iter()
-                .any(|participant| participant.controller == Controller::Human)
     }
 
     pub fn can_ready(&self) -> bool {
@@ -612,7 +610,9 @@ impl LocalGame {
         self.winner = None;
         self.exploding = false;
         self.reset_animation();
-        Ok(())
+        // Первое место может принадлежать боту (в том числе когда ботов все):
+        // его ход запускается сразу, дальше партию гоняет анимация.
+        self.begin_bot_turn()
     }
 
     /// Ход живого участника: применяет изменение клетки и переходит в
@@ -764,7 +764,7 @@ impl LocalGame {
             .into_iter()
             .map(|team| {
                 let (cells, mass) = team_totals(&self.game, team);
-                let participants = self
+                let participants: Vec<_> = self
                     .participants
                     .iter()
                     .enumerate()
@@ -783,6 +783,13 @@ impl LocalGame {
                         if characters.is_empty() {
                             return None;
                         }
+
+                        // Участник проиграл, когда выбыли все его персонажи в этой
+                        // команде: карточка тускнеет, это видно и во время
+                        // партии, и после её завершения (до правок в лобби).
+                        let lost = characters
+                            .iter()
+                            .all(|character| self.is_eliminated(*character));
 
                         let mut wins = 0u16;
                         let mut losses = 0u16;
@@ -804,15 +811,19 @@ impl LocalGame {
                             wins,
                             losses,
                             moves,
+                            lost,
                         })
                     })
                     .collect();
+                let lost =
+                    !participants.is_empty() && participants.iter().all(|member| member.lost);
                 TeamView {
                     team,
                     hue: self.team_hue(team),
                     cells,
                     mass,
                     participants,
+                    lost,
                 }
             })
             .collect()
@@ -998,6 +1009,8 @@ pub struct TeamParticipantView {
     pub wins: u16,
     pub losses: u16,
     pub moves: u16,
+    /// Все персонажи участника в этой команде выбыли.
+    pub lost: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1007,6 +1020,8 @@ pub struct TeamView {
     pub cells: u16,
     pub mass: i32,
     pub participants: Vec<TeamParticipantView>,
+    /// Все участники команды проиграли.
+    pub lost: bool,
 }
 
 /// Reactive handle shared by the game page, the team panels and the lobby.
@@ -1363,6 +1378,71 @@ mod tests {
         game.remove_participant(bot).unwrap();
 
         assert!(!game.can_start());
+    }
+
+    #[test]
+    fn the_match_requires_two_occupied_teams() {
+        let mut game = LocalGame::new();
+        let human = game
+            .participants
+            .iter()
+            .find(|participant| participant.controller == Controller::Human)
+            .map(|participant| participant.id)
+            .unwrap();
+
+        // Оба участника в одной команде — старт невозможен.
+        game.set_participant_team(human, tid(2)).unwrap();
+        assert!(!game.can_start());
+        assert!(game.ready().is_ok());
+        assert_eq!(game.phase, GamePhase::Lobby);
+    }
+
+    #[test]
+    fn an_all_bot_lobby_can_start_the_match() {
+        let mut game = LocalGame::new();
+        let human = game
+            .participants
+            .iter()
+            .find(|participant| participant.controller == Controller::Human)
+            .map(|participant| participant.id)
+            .unwrap();
+        game.set_participant_controller(human, Controller::Bot(2))
+            .unwrap();
+
+        assert!(game.can_start());
+
+        game.ready().unwrap();
+        assert_eq!(game.phase, GamePhase::Playing);
+        assert!(!game.is_human_turn());
+        // Ход первого бота уже сделан и доигрывается анимацией.
+        assert!(game.is_animating());
+    }
+
+    #[test]
+    fn surrendered_participant_and_team_are_marked_lost() {
+        let mut game = started();
+        let human = game
+            .participants
+            .iter()
+            .find(|participant| participant.controller == Controller::Human)
+            .map(|participant| participant.id)
+            .unwrap();
+
+        game.surrender().unwrap();
+        assert_eq!(game.phase, GamePhase::Finished);
+
+        let views = game.team_views();
+        let human_team_view = views
+            .iter()
+            .find(|view| view.participants.iter().any(|member| member.id == human))
+            .unwrap();
+        assert!(
+            human_team_view
+                .participants
+                .iter()
+                .all(|member| member.lost)
+        );
+        assert!(human_team_view.lost);
     }
 
     #[test]

@@ -1,13 +1,13 @@
 use forup_core::api::game::board::prelude::BoardCode;
 use leptos::prelude::*;
-use thaw::{Button, ButtonAppearance, ButtonSize, Card, CardHeader, Slider, Switch};
+use thaw::{Card, CardHeader, Slider, Switch};
 
+use crate::components::ModeCheckbox;
 use crate::game::{GamePhase, GameSession};
 use crate::i18n::*;
 
 /// Pre-match settings: a single board-size slider, the automatic cell
-/// distribution switch, the Lossy/Lossless explosion toggle and the
-/// board-rotation control.
+/// distribution switch and the Lossy/Lossless explosion checkbox.
 #[component]
 pub fn GameSettingsPanel() -> impl IntoView {
     let i18n = use_i18n();
@@ -87,24 +87,19 @@ pub fn GameSettingsPanel() -> impl IntoView {
         })
     };
 
-    let lossy_class = move || {
-        let mut class = String::from("explosion-toggle__option explosion-toggle__option--lossy");
-        if !lossless.get() {
-            class.push_str(" explosion-toggle__option--active");
-        }
-        class
-    };
-    let lossless_class = move || {
-        let mut class = String::from("explosion-toggle__option explosion-toggle__option--lossless");
-        if lossless.get() {
-            class.push_str(" explosion-toggle__option--active");
-        }
-        class
-    };
+    // Чекбокс режима взрывов: включён — Lossless (зелёный "+"),
+    // выключен — Lossy (красный "−").
+    let explosion_checked = Signal::derive(move || lossless.get());
+    let set_explosion = SignalSetter::map(move |checked: bool| lossless.set(checked));
+    let explosion_label = Signal::derive(move || {
+        let state = if lossless.get() {
+            t_string!(i18n, lossless)
+        } else {
+            t_string!(i18n, lossy)
+        };
+        format!("{}: {state}", t_string!(i18n, explosion_mode))
+    });
 
-    let lossy_label = "Lossy";
-    let lossless_label = "Lossless";
-    let group_label = Memo::new(move |_| t_string!(i18n, explosion_mode).to_string());
     let automatic_label = Memo::new(move |_| t_string!(i18n, automatic_distribution).to_string());
     let spacing_label = Memo::new(move |_| t_string!(i18n, safe_radius).to_string());
     let spacing_text = move || {
@@ -155,65 +150,14 @@ pub fn GameSettingsPanel() -> impl IntoView {
                     />
 
                     <div class="settings-row__right">
-                        <div
-                            class="explosion-toggle"
-                            role="group"
-                            aria-label=group_label
-                        >
-                            <button
-                                type="button"
-                                class=lossy_class
-                                aria-pressed=move || (!lossless.get()).to_string()
-                                aria-label=lossy_label
-                                title=lossy_label
-                                on:click=move |_| lossless.set(false)
-                            >
-                                <span
-                                    class="explosion-toggle__dot explosion-toggle__dot--lossy"
-                                    aria-hidden="true"
-                                ></span>
-                                <span class="explosion-toggle__text">{lossy_label}</span>
-                            </button>
-                            <button
-                                type="button"
-                                class=lossless_class
-                                aria-pressed=move || lossless.get().to_string()
-                                aria-label=lossless_label
-                                title=lossless_label
-                                on:click=move |_| lossless.set(true)
-                            >
-                                <span
-                                    class="explosion-toggle__dot explosion-toggle__dot--lossless"
-                                    aria-hidden="true"
-                                ></span>
-                                <span class="explosion-toggle__text">{lossless_label}</span>
-                            </button>
-                        </div>
-                        <RotateBoardButton/>
+                        <ModeCheckbox
+                            checked=explosion_checked
+                            set_checked=set_explosion
+                            label=explosion_label
+                        />
                     </div>
                 </div>
             </Card>
         </Show>
-    }
-}
-
-/// Rotates the board view 90° clockwise. Purely visual: the game state keeps
-/// its own coordinates.
-#[component]
-pub fn RotateBoardButton() -> impl IntoView {
-    let i18n = use_i18n();
-    let session = GameSession::expect();
-    let label = move || t_string!(i18n, rotate_board).to_string();
-
-    view! {
-        <Button
-            class="rotate-board"
-            size=ButtonSize::Small
-            appearance=ButtonAppearance::Subtle
-            on_click=move |_| session.rotate_board()
-        >
-            <span class="rotate-board__icon" aria-hidden="true">"⟳"</span>
-            <span class="rotate-board__label">{label}</span>
-        </Button>
     }
 }
