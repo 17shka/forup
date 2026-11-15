@@ -19,7 +19,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use forup_core::api::auth::UserId;
 use forup_core::api::network::{
     BoardSizeRequest, CreateRoomRequest, DistributionRequest, ExplosionRequest, MemberRequest,
     MoveRequest, OpenRequest, RadiusRequest, ReadyRequest, Room, RoomDirectory, RoomError, RoomId,
@@ -714,14 +713,11 @@ async fn rematch_game(
     build_state(&state, id, me, &directory)
 }
 
-/// Идентичность игрока в рамках комнаты: идентификаторы аккаунтов начинаются
-/// с 1, поэтому коллизий с локальными uuid быть не может.
-fn member_uuid(user: UserId) -> Uuid {
-    Uuid::new(user.get()).expect("user id is nonzero")
-}
-
+/// Идентичность игрока в рамках комнаты: идентификаторы аккаунтов и сетевые
+/// uuid — один и тот же тип; аккаунты начинаются с 1, поэтому коллизий с
+/// локальными uuid быть не может.
 fn authenticated_member(state: &ApiState, headers: &HeaderMap) -> Result<Uuid, Response> {
-    authenticated(state, headers).map(member_uuid)
+    authenticated(state, headers)
 }
 
 fn parse_room_id(raw: u32) -> Result<RoomId, Response> {
@@ -763,13 +759,12 @@ fn build_state(state: &ApiState, id: RoomId, me: Uuid, directory: &RoomDirectory
 }
 
 /// Отображаемые имена участников по их uuid (профили живут только на сервере).
-fn member_names(state: &ApiState, room: &Room) -> HashMap<u32, String> {
+fn member_names(state: &ApiState, room: &Room) -> HashMap<Uuid, String> {
     room.members()
         .keys()
         .filter_map(|id| {
-            let user = UserId::new(id.get())?;
-            let profile = state.users.profile(user).ok().flatten()?;
-            Some((id.get(), profile.name))
+            let profile = state.users.profile(*id).ok().flatten()?;
+            Some((*id, profile.name))
         })
         .collect()
 }

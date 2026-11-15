@@ -1413,10 +1413,10 @@ impl Game {
     }
 
     fn eliminate(&mut self, member_id: CharacterId) {
-        if let Some(character) = self.characters.get_mut(&member_id) {
-            if character.stats.losses == 0 {
-                character.stats.losses = 1;
-            }
+        if let Some(character) = self.characters.get_mut(&member_id)
+            && character.stats.losses == 0
+        {
+            character.stats.losses = 1;
         }
         if self.is_turn(member_id) {
             self.advance_turn();

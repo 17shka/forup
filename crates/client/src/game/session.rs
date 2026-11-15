@@ -23,7 +23,7 @@ pub enum Controller {
     Human,
     Bot(u8),
     /// Сетевой участник: идентификатор его аккаунта на сервере.
-    Remote(u32),
+    Remote(Uuid),
 }
 
 impl Controller {
@@ -150,7 +150,7 @@ impl LocalGame {
         not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))),
         allow(dead_code)
     )]
-    pub fn from_room(room: &Room, me: Uuid, names: &HashMap<u32, String>) -> Self {
+    pub fn from_room(room: &Room, me: Uuid, names: &HashMap<Uuid, String>) -> Self {
         let game = room.game().clone();
         let phase = if game.is_started() {
             GamePhase::Playing
@@ -166,8 +166,8 @@ impl LocalGame {
         let mut players = Vec::new();
         for (id, data) in room.members() {
             players.push(RoomPlayer {
-                id: id.get(),
-                name: names.get(&id.get()).cloned(),
+                id: *id,
+                name: names.get(id).cloned(),
                 ready: data.status() == Status::Ready,
                 admin: data.is_admin(),
             });
@@ -182,11 +182,11 @@ impl LocalGame {
                     let ready = room
                         .member(player)
                         .map(|member| member.status() == Status::Ready);
-                    let name = names.get(&player.get()).cloned();
+                    let name = names.get(&player).cloned();
                     if player == me {
                         (Controller::Human, name, ready)
                     } else {
-                        (Controller::Remote(player.get()), name, ready)
+                        (Controller::Remote(player), name, ready)
                     }
                 }
                 MemberId::Bot => (
@@ -373,17 +373,26 @@ impl LocalGame {
         self.add_participant_on_team(controller, team)
     }
 
+    /// Участник по идентификатору.
+    fn participant(&self, id: ParticipantId) -> Option<&Participant> {
+        self.participants
+            .iter()
+            .find(|participant| participant.id == id)
+    }
+
+    /// Индекс участника по идентификатору.
+    fn participant_index(&self, id: ParticipantId) -> Option<usize> {
+        self.participants
+            .iter()
+            .position(|participant| participant.id == id)
+    }
+
     fn add_participant_on_team(
         &mut self,
         controller: Controller,
         team: TeamId,
     ) -> Result<ParticipantId, GameError> {
-        // Editing a finished match first returns to a clean lobby, so the
-        // engine no longer considers the game started.
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
+        self.ensure_editable()?;
 
         let id = self.next_participant_id;
         self.next_participant_id = self.next_participant_id.saturating_add(1);
@@ -418,14 +427,15 @@ impl LocalGame {
             .collect()
     }
 
-    fn lowest_free_bot_number(used: &BTreeSet<u8>) -> u8 {
+    /// Наименьший свободный номер из 1..=255 в занятом наборе.
+    fn lowest_free_number(used: &BTreeSet<u8>) -> u8 {
         (1..=u8::MAX)
             .find(|number| !used.contains(number))
             .unwrap_or(u8::MAX)
     }
 
     fn next_bot_number(&self) -> u8 {
-        Self::lowest_free_bot_number(&self.used_bot_numbers())
+        Self::lowest_free_number(&self.used_bot_numbers())
     }
 
     /// Adds another character to a participant. The lobby UI works with one
@@ -435,16 +445,11 @@ impl LocalGame {
         &mut self,
         participant_id: ParticipantId,
     ) -> Result<CharacterId, GameError> {
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
+        self.ensure_editable()?;
 
         let (controller, team) = {
             let participant = self
-                .participants
-                .iter()
-                .find(|participant| participant.id == participant_id)
+                .participant(participant_id)
                 .ok_or(GameError::CharacterNotFound)?;
             let team = participant
                 .characters
@@ -465,27 +470,16 @@ impl LocalGame {
             Controller::Remote(_) => return Err(GameError::CharacterNotFound),
         };
 
-        if let Some(participant) = self
-            .participants
-            .iter_mut()
-            .find(|participant| participant.id == participant_id)
-        {
-            participant.characters.push(character);
+        if let Some(index) = self.participant_index(participant_id) {
+            self.participants[index].characters.push(character);
         }
         Ok(character)
     }
 
     pub fn remove_participant(&mut self, participant_id: ParticipantId) -> Result<(), GameError> {
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
+        self.ensure_editable()?;
 
-        let Some(index) = self
-            .participants
-            .iter()
-            .position(|participant| participant.id == participant_id)
-        else {
+        let Some(index) = self.participant_index(participant_id) else {
             return Err(GameError::CharacterNotFound);
         };
         let participant = self.participants.remove(index);
@@ -498,9 +492,7 @@ impl LocalGame {
     /// Позиция участника в последовательности ходов (с нуля): индекс
     /// его первого персонажа в порядке ходов движка.
     pub fn turn_position(&self, participant_id: ParticipantId) -> Option<usize> {
-        self.participants
-            .iter()
-            .find(|participant| participant.id == participant_id)?
+        self.participant(participant_id)?
             .characters
             .iter()
             .find_map(|character| self.game.characters().get_index_of(character))
@@ -522,17 +514,12 @@ impl LocalGame {
         participant_id: ParticipantId,
         target_position: usize,
     ) -> Result<(), GameError> {
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
+        self.ensure_editable()?;
         if self.turn_position(participant_id) == Some(target_position) {
             return Ok(());
         }
         let a = self
-            .participants
-            .iter()
-            .find(|participant| participant.id == participant_id)
+            .participant(participant_id)
             .and_then(|participant| participant.characters.first().copied())
             .ok_or(GameError::CharacterNotFound)?;
         let b = self
@@ -551,25 +538,18 @@ impl LocalGame {
         participant_id: ParticipantId,
         character: CharacterId,
     ) -> Result<(), GameError> {
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
+        self.ensure_editable()?;
 
-        let belongs_to_participant = self.participants.iter().any(|participant| {
-            participant.id == participant_id && participant.characters.contains(&character)
-        });
+        let belongs_to_participant = self
+            .participant(participant_id)
+            .is_some_and(|participant| participant.characters.contains(&character));
         if !belongs_to_participant {
             return Err(GameError::CharacterNotFound);
         }
 
         self.game.kick_member(character)?;
-        if let Some(participant) = self
-            .participants
-            .iter_mut()
-            .find(|participant| participant.id == participant_id)
-        {
-            participant
+        if let Some(index) = self.participant_index(participant_id) {
+            self.participants[index]
                 .characters
                 .retain(|candidate| *candidate != character);
         }
@@ -584,15 +564,8 @@ impl LocalGame {
         participant_id: ParticipantId,
         controller: Controller,
     ) -> Result<(), GameError> {
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
-        let Some(index) = self
-            .participants
-            .iter()
-            .position(|participant| participant.id == participant_id)
-        else {
+        self.ensure_editable()?;
+        let Some(index) = self.participant_index(participant_id) else {
             return Err(GameError::CharacterNotFound);
         };
         if self.participants[index].controller == controller {
@@ -623,7 +596,7 @@ impl LocalGame {
     /// itself without the list growing on every selection.
     pub fn controller_options(&self) -> Vec<Controller> {
         let mut numbers = self.used_bot_numbers();
-        let next = Self::lowest_free_bot_number(&numbers);
+        let next = Self::lowest_free_number(&numbers);
         numbers.insert(next);
 
         let mut options = Vec::with_capacity(numbers.len() + 1);
@@ -633,9 +606,7 @@ impl LocalGame {
     }
 
     pub fn participant_controller(&self, participant_id: ParticipantId) -> Option<Controller> {
-        self.participants
-            .iter()
-            .find(|participant| participant.id == participant_id)
+        self.participant(participant_id)
             .map(|participant| participant.controller)
     }
 
@@ -663,44 +634,27 @@ impl LocalGame {
     )]
     pub fn seat_bot_options(&self) -> Vec<u8> {
         let mut numbers = self.used_bot_numbers();
-        numbers.insert(Self::lowest_free_bot_number(&numbers));
+        numbers.insert(Self::lowest_free_number(&numbers));
         numbers.into_iter().collect()
     }
 
     pub fn participant_team(&self, participant_id: ParticipantId) -> Option<TeamId> {
-        let participant = self
-            .participants
+        self.participant(participant_id)?
+            .characters
             .iter()
-            .find(|participant| participant.id == participant_id)?;
-        participant.characters.iter().find_map(|character| {
-            self.game
-                .characters()
-                .get(character)
-                .map(|data| data.team_id)
-        })
+            .find_map(|character| {
+                self.game
+                    .characters()
+                    .get(character)
+                    .map(|data| data.team_id)
+            })
     }
 
     pub fn participant_stats(&self, participant_id: ParticipantId) -> (u16, u16, u16) {
-        let Some(participant) = self
-            .participants
-            .iter()
-            .find(|participant| participant.id == participant_id)
-        else {
+        let Some(participant) = self.participant(participant_id) else {
             return (0, 0, 0);
         };
-
-        let mut wins = 0u16;
-        let mut losses = 0u16;
-        let mut moves = 0u16;
-        for character in &participant.characters {
-            if let Some(data) = self.game.characters().get(character) {
-                let stat = data.stats;
-                wins = wins.saturating_add(u16::from(stat.wins));
-                losses = losses.saturating_add(u16::from(stat.losses));
-                moves = moves.saturating_add(stat.total_moves());
-            }
-        }
-        (wins, losses, moves)
+        self.character_stats(&participant.characters)
     }
 
     /// Moves every character of a participant to the chosen team. The lobby UI
@@ -711,15 +665,8 @@ impl LocalGame {
         participant_id: ParticipantId,
         team: TeamId,
     ) -> Result<(), GameError> {
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
-        let Some(participant) = self
-            .participants
-            .iter()
-            .find(|participant| participant.id == participant_id)
-        else {
+        self.ensure_editable()?;
+        let Some(participant) = self.participant(participant_id) else {
             return Err(GameError::CharacterNotFound);
         };
         let characters = participant.characters.clone();
@@ -778,10 +725,7 @@ impl LocalGame {
 
     /// Resizes the board. Only allowed outside a running match.
     pub fn set_board_size(&mut self, size: BoardCode) -> Result<(), GameError> {
-        self.enter_edit_mode();
-        if self.game.is_started() {
-            return Err(GameError::GameAlreadyStarted);
-        }
+        self.ensure_editable()?;
         self.game.set_board_size(size)?;
         self.reset_animation();
         Ok(())
@@ -897,6 +841,12 @@ impl LocalGame {
             .and_then(|character| self.character_participant_id(character))
     }
 
+    /// Ходящий сейчас участник.
+    pub fn current_participant(&self) -> Option<&Participant> {
+        self.current_participant_id()
+            .and_then(|id| self.participant(id))
+    }
+
     /// The next distinct participant in turn order, skipping eliminated seats.
     pub fn next_participant_id(&self) -> Option<ParticipantId> {
         let current = self.current_participant_id()?;
@@ -968,12 +918,11 @@ impl LocalGame {
         if self.phase != GamePhase::Playing {
             return None;
         }
-        if self.is_human_turn() {
-            if let Some(character) = self.current_character() {
-                if !self.is_eliminated(character) {
-                    return Some(character);
-                }
-            }
+        if self.is_human_turn()
+            && let Some(character) = self.current_character()
+            && !self.is_eliminated(character)
+        {
+            return Some(character);
         }
         self.participants
             .iter()
@@ -1184,24 +1133,14 @@ impl LocalGame {
     /// Occupied teams plus the lowest free one, so every current value stays
     /// selectable while the list never grows unnecessarily.
     pub fn team_options(&self) -> Vec<TeamId> {
-        let mut numbers: BTreeSet<u8> = self
-            .game
-            .characters()
-            .values()
-            .map(|character| character.team_id.get())
-            .collect();
-        let next = (1..=u8::MAX)
-            .find(|number| !numbers.contains(number))
-            .unwrap_or(u8::MAX);
-        numbers.insert(next);
+        let mut numbers = self.used_team_numbers();
+        numbers.insert(Self::lowest_free_number(&numbers));
         numbers.into_iter().filter_map(TeamId::new).collect()
     }
 
     #[allow(dead_code)]
     pub fn character_views(&self, participant_id: ParticipantId) -> Vec<CharacterView> {
-        self.participants
-            .iter()
-            .find(|participant| participant.id == participant_id)
+        self.participant(participant_id)
             .map(|participant| {
                 participant
                     .characters
@@ -1252,17 +1191,7 @@ impl LocalGame {
                             .iter()
                             .all(|character| self.is_eliminated(*character));
 
-                        let mut wins = 0u16;
-                        let mut losses = 0u16;
-                        let mut moves = 0u16;
-                        for character in &characters {
-                            if let Some(data) = self.game.characters().get(character) {
-                                let stat = data.stats;
-                                wins = wins.saturating_add(u16::from(stat.wins));
-                                losses = losses.saturating_add(u16::from(stat.losses));
-                                moves = moves.saturating_add(stat.total_moves());
-                            }
-                        }
+                        let (wins, losses, moves) = self.character_stats(&characters);
 
                         Some(TeamParticipantView {
                             id: participant.id,
@@ -1320,16 +1249,16 @@ impl LocalGame {
     }
 
     fn next_team_id(&self) -> TeamId {
-        let used: BTreeSet<u8> = self
-            .game
+        TeamId::new(Self::lowest_free_number(&self.used_team_numbers())).unwrap_or(TeamId::MIN)
+    }
+
+    /// Занятые номера команд.
+    fn used_team_numbers(&self) -> BTreeSet<u8> {
+        self.game
             .characters()
             .values()
             .map(|character| character.team_id.get())
-            .collect();
-        (1..=u8::MAX)
-            .filter_map(TeamId::new)
-            .find(|team| !used.contains(&team.get()))
-            .unwrap_or(TeamId::MIN)
+            .collect()
     }
 
     /// Editing after a finished match returns to a clean lobby while keeping
@@ -1344,6 +1273,32 @@ impl LocalGame {
         self.winner = None;
         self.exploding = false;
         self.reset_animation();
+    }
+
+    /// Правки лобби возможны только до старта партии: возврат из завершённой
+    /// партии в чистое лобби и отказ, если партия уже идёт.
+    fn ensure_editable(&mut self) -> Result<(), GameError> {
+        self.enter_edit_mode();
+        if self.game.is_started() {
+            return Err(GameError::GameAlreadyStarted);
+        }
+        Ok(())
+    }
+
+    /// Суммарная статистика персонажей: победы, поражения, ходы.
+    fn character_stats(&self, characters: &[CharacterId]) -> (u16, u16, u16) {
+        let mut wins = 0u16;
+        let mut losses = 0u16;
+        let mut moves = 0u16;
+        for character in characters {
+            if let Some(data) = self.game.characters().get(character) {
+                let stat = data.stats;
+                wins = wins.saturating_add(u16::from(stat.wins));
+                losses = losses.saturating_add(u16::from(stat.losses));
+                moves = moves.saturating_add(stat.total_moves());
+            }
+        }
+        (wins, losses, moves)
     }
 
     fn begin_animation_burst(&mut self) {
@@ -1550,7 +1505,7 @@ pub struct TeamView {
     allow(dead_code)
 )]
 pub struct RoomPlayer {
-    pub id: u32,
+    pub id: Uuid,
     pub name: Option<String>,
     pub ready: bool,
     pub admin: bool,
@@ -2203,8 +2158,8 @@ mod tests {
         room.set_ready(guest, true).unwrap();
 
         let mut names = HashMap::new();
-        names.insert(7u32, "Alice".to_string());
-        names.insert(9u32, "Robin".to_string());
+        names.insert(me, "Alice".to_string());
+        names.insert(guest, "Robin".to_string());
 
         let game = LocalGame::from_room(&room, me, &names);
         assert_eq!(game.me, Some(me));
@@ -2221,17 +2176,17 @@ mod tests {
         let remote = game
             .participants
             .iter()
-            .find(|participant| matches!(participant.controller, Controller::Remote(id) if id == 9))
+            .find(|participant| matches!(participant.controller, Controller::Remote(id) if id == guest))
             .unwrap();
         assert_eq!(remote.name.as_deref(), Some("Robin"));
         assert_eq!(remote.ready, Some(true));
 
         assert_eq!(game.players.len(), 2);
-        assert_eq!(game.players[0].id, 7);
+        assert_eq!(game.players[0].id, me);
         assert_eq!(game.players[0].name.as_deref(), Some("Alice"));
         assert!(!game.players[0].ready);
         assert!(game.players[0].admin);
-        assert_eq!(game.players[1].id, 9);
+        assert_eq!(game.players[1].id, guest);
         assert_eq!(game.players[1].name.as_deref(), Some("Robin"));
         assert!(game.players[1].ready);
         assert!(!game.players[1].admin);

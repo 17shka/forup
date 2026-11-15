@@ -5,6 +5,8 @@ use leptos_use::storage::{StorageType, UseStorageOptions, use_storage_with_optio
 
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
 use crate::net;
+#[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
+use serde::{Serialize, de::DeserializeOwned};
 
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
 use forup_core::api::auth::{LoginRequest, RegisterRequest, UserResponse};
@@ -60,6 +62,33 @@ impl AuthState {
         self.error.set(None);
     }
 
+    /// Обшая отправка формы аккаунта: кодирует тело postcard'ом, шлёт запрос,
+    /// применяет ответ через `apply` и копит ошибку. `loading` гасится в конце.
+    #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
+    fn submit<R, B>(
+        self,
+        method: &'static str,
+        path: &'static str,
+        token: Option<String>,
+        request: B,
+        apply: impl FnOnce(AuthState, R) + 'static,
+    ) where
+        R: DeserializeOwned + 'static,
+        B: Serialize + 'static,
+    {
+        spawn_local(async move {
+            let response = match postcard::to_allocvec(&request) {
+                Ok(body) => net::api_request::<R>(method, path, token.as_deref(), Some(body)).await,
+                Err(error) => Err(error.to_string()),
+            };
+            match response {
+                Ok(response) => apply(self, response),
+                Err(error) => self.error.set(Some(error)),
+            }
+            self.loading.set(false);
+        });
+    }
+
     fn bootstrap(self) {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
         {
@@ -95,30 +124,17 @@ impl AuthState {
         self.error.set(None);
         self.loading.set(true);
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
-        spawn_local(async move {
-            let body = postcard::to_allocvec(&RegisterRequest {
+        self.submit(
+            "POST",
+            "/api/auth/register",
+            None,
+            RegisterRequest {
                 name,
                 email,
                 password,
-            });
-            match body {
-                Ok(body) => {
-                    match net::api_request::<AuthResponse>(
-                        "POST",
-                        "/api/auth/register",
-                        None,
-                        Some(body),
-                    )
-                    .await
-                    {
-                        Ok(response) => self.apply_session(response),
-                        Err(error) => self.error.set(Some(error)),
-                    }
-                }
-                Err(error) => self.error.set(Some(error.to_string())),
-            }
-            self.loading.set(false);
-        });
+            },
+            AuthState::apply_session,
+        );
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         {
             let _ = (name, email, password);
@@ -130,26 +146,13 @@ impl AuthState {
         self.error.set(None);
         self.loading.set(true);
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
-        spawn_local(async move {
-            let body = postcard::to_allocvec(&LoginRequest { email, password });
-            match body {
-                Ok(body) => {
-                    match net::api_request::<AuthResponse>(
-                        "POST",
-                        "/api/auth/login",
-                        None,
-                        Some(body),
-                    )
-                    .await
-                    {
-                        Ok(response) => self.apply_session(response),
-                        Err(error) => self.error.set(Some(error)),
-                    }
-                }
-                Err(error) => self.error.set(Some(error.to_string())),
-            }
-            self.loading.set(false);
-        });
+        self.submit(
+            "POST",
+            "/api/auth/login",
+            None,
+            LoginRequest { email, password },
+            AuthState::apply_session,
+        );
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         {
             let _ = (email, password);
@@ -211,26 +214,15 @@ impl AuthState {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
         {
             self.loading.set(true);
-            spawn_local(async move {
-                let body = postcard::to_allocvec(&request);
-                match body {
-                    Ok(body) => {
-                        match net::api_request::<UserResponse>(
-                            "PATCH",
-                            "/api/auth/profile",
-                            Some(&token),
-                            Some(body),
-                        )
-                        .await
-                        {
-                            Ok(response) => self.user.set(Some(response.user)),
-                            Err(error) => self.error.set(Some(error)),
-                        }
-                    }
-                    Err(error) => self.error.set(Some(error.to_string())),
-                }
-                self.loading.set(false);
-            });
+            self.submit(
+                "PATCH",
+                "/api/auth/profile",
+                Some(token),
+                request,
+                |state, response: UserResponse| {
+                    state.user.set(Some(response.user));
+                },
+            );
         }
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         let _ = request;

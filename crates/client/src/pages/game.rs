@@ -40,16 +40,16 @@ fn cell_animation_class(tick: u64, growing: bool) -> &'static str {
 
 fn cell_class(state: &LocalGame, pos: BoardCode) -> String {
     let mut class = String::from("board-cell");
-    if let Some(cell) = state.game.board().get(pos) {
-        if cell.owner.is_some() {
-            class.push_str(" board-cell--owned");
-            if state.phase == GamePhase::Playing && cell.owner != state.current_team() {
-                // Ход другой команды: её клетки показываются тусклее.
-                class.push_str(" board-cell--dim");
-            }
-            if cell.can_explode() {
-                class.push_str(" board-cell--charged");
-            }
+    if let Some(cell) = state.game.board().get(pos)
+        && cell.owner.is_some()
+    {
+        class.push_str(" board-cell--owned");
+        if state.phase == GamePhase::Playing && cell.owner != state.current_team() {
+            // Ход другой команды: её клетки показываются тусклее.
+            class.push_str(" board-cell--dim");
+        }
+        if cell.can_explode() {
+            class.push_str(" board-cell--charged");
         }
     }
     if state.can_move_to(pos) {
@@ -107,25 +107,17 @@ pub fn GamePage() -> impl IntoView {
                 Some(team) => t_string!(i18n, team_won, id = team.get()).to_string(),
                 None => t_string!(i18n, game_over).to_string(),
             },
-            GamePhase::Playing => {
-                let current = game.current_participant_id().and_then(|id| {
-                    game.participants
-                        .iter()
-                        .find(|participant| participant.id == id)
-                        .map(|participant| (participant.controller, participant.name.clone()))
-                });
-                match current {
-                    Some((Controller::Bot(number), _)) => {
-                        t_string!(i18n, turn_bot, id = number).to_string()
-                    }
-                    Some((Controller::Human, _)) => t_string!(i18n, your_turn).to_string(),
-                    Some((Controller::Remote(id), name)) => {
-                        let label = name.unwrap_or_else(|| format!("#{id}"));
+            GamePhase::Playing => match game.current_participant() {
+                Some(participant) => match participant.controller {
+                    Controller::Bot(number) => t_string!(i18n, turn_bot, id = number).to_string(),
+                    Controller::Human => t_string!(i18n, your_turn).to_string(),
+                    Controller::Remote(id) => {
+                        let label = participant.name.clone().unwrap_or_else(|| format!("#{id}"));
                         t_string!(i18n, turn_player, id = label).to_string()
                     }
-                    None => t_string!(i18n, game_over).to_string(),
-                }
-            }
+                },
+                None => t_string!(i18n, game_over).to_string(),
+            },
         })
     };
 
@@ -183,21 +175,21 @@ pub fn GamePage() -> impl IntoView {
     let toaster = ToasterInjection::expect_context();
     Effect::new(move |previous: Option<Option<GameError>>| {
         let current = session.error.get();
-        if let Some(error) = current {
-            if previous.flatten() != Some(error) {
-                let message = error_text(&error);
-                toaster.dispatch_toast(
-                    move || {
-                        view! {
-                            <Toast>
-                                <ToastTitle>{message}</ToastTitle>
-                            </Toast>
-                        }
-                    },
-                    ToastOptions::default().with_intent(ToastIntent::Error),
-                );
-                session.error.set(None);
-            }
+        if let Some(error) = current
+            && previous.flatten() != Some(error)
+        {
+            let message = error_text(&error);
+            toaster.dispatch_toast(
+                move || {
+                    view! {
+                        <Toast>
+                            <ToastTitle>{message}</ToastTitle>
+                        </Toast>
+                    }
+                },
+                ToastOptions::default().with_intent(ToastIntent::Error),
+            );
+            session.error.set(None);
         }
         current
     });
@@ -223,21 +215,21 @@ pub fn GamePage() -> impl IntoView {
     };
     Effect::new(move |previous: Option<Option<NetError>>| {
         let current = session.net_error.get();
-        if previous.flatten() != current {
-            if let Some(error) = current.clone() {
-                let message = net_error_text(&error);
-                toaster.dispatch_toast(
-                    move || {
-                        view! {
-                            <Toast>
-                                <ToastTitle>{message}</ToastTitle>
-                            </Toast>
-                        }
-                    },
-                    ToastOptions::default().with_intent(ToastIntent::Error),
-                );
-                session.net_error.set(None);
-            }
+        if previous.flatten() != current
+            && let Some(error) = current.clone()
+        {
+            let message = net_error_text(&error);
+            toaster.dispatch_toast(
+                move || {
+                    view! {
+                        <Toast>
+                            <ToastTitle>{message}</ToastTitle>
+                        </Toast>
+                    }
+                },
+                ToastOptions::default().with_intent(ToastIntent::Error),
+            );
+            session.net_error.set(None);
         }
         current
     });
@@ -254,6 +246,20 @@ pub fn GamePage() -> impl IntoView {
     });
     on_cleanup(move || session.bump_poll());
 
+    // Кнопки, работающие в обоих режимах: онлайн — серверной командой,
+    // офлайн — прямым вызовом движка.
+    fn act(
+        session: &GameSession,
+        net: fn(&GameSession),
+        local: fn(&mut LocalGame) -> Result<(), GameError>,
+    ) {
+        if session.room.get_untracked().is_some() {
+            net(session);
+        } else {
+            session.dispatch(local);
+        }
+    }
+
     let on_exit = move |_| {
         if session.room.get_untracked().is_some() {
             session.leave_room();
@@ -262,89 +268,50 @@ pub fn GamePage() -> impl IntoView {
         }
         navigate("/", Default::default());
     };
-    let on_skip = move |_| {
-        if session.room.get_untracked().is_some() {
-            session.net_skip();
-        } else {
-            session.dispatch(LocalGame::skip);
-        }
-    };
-    let on_surrender = move |_| {
-        if session.room.get_untracked().is_some() {
-            session.net_surrender();
-        } else {
-            session.dispatch(LocalGame::surrender);
-        }
-    };
+    let on_skip = move |_| act(&session, GameSession::net_skip, LocalGame::skip);
+    let on_surrender = move |_| act(&session, GameSession::net_surrender, LocalGame::surrender);
     // Офлайн-игрок — администратор собственного стола.
     let is_admin = move || session.room.get().is_none_or(|room| room.is_admin);
-    let on_finish = move |_| {
-        if session.room.get_untracked().is_some() {
-            session.net_end_game();
-        } else {
-            session.dispatch(LocalGame::end_game);
-        }
-    };
+    let on_finish = move |_| act(&session, GameSession::net_end_game, LocalGame::end_game);
     let on_ready = move |_| {
-        match session.room.get_untracked() {
-            // Онлафн: кнопка работает как переключатель готовности для всех —
+        let finished = session
+            .state
+            .with_untracked(|game| game.phase == GamePhase::Finished);
+        if session.room.get_untracked().is_some() {
+            // Онлайн: кнопка работает как переключатель готовности для всех —
             // и админа, и участника. Повторное нажатие снимает готовность.
             // «Заново» после конца партии — тоже эта кнопка: локальное
             // предсказание подтверждается сервером.
-            Some(_) => {
-                let finished = session
-                    .state
-                    .with_untracked(|game| game.phase == GamePhase::Finished);
-                if finished {
-                    session.net_rematch();
-                } else {
-                    let ready = session.state.with_untracked(LocalGame::own_ready) != Some(true);
-                    session.net_set_ready(ready);
-                }
+            if finished {
+                session.net_rematch();
+            } else {
+                let ready = session.state.with_untracked(LocalGame::own_ready) != Some(true);
+                session.net_set_ready(ready);
             }
-            None => {
-                let finished = session
-                    .state
-                    .with_untracked(|game| game.phase == GamePhase::Finished);
-                if finished {
-                    session.dispatch(LocalGame::rematch);
-                } else {
-                    session.dispatch(LocalGame::ready);
-                }
-            }
+        } else if finished {
+            session.dispatch(LocalGame::rematch);
+        } else {
+            session.dispatch(LocalGame::ready);
         }
     };
 
     let ready_label = move || {
         session.state.with(|game| {
-            let room = session.room.get();
-            let finished = game.phase == GamePhase::Finished;
-            match room {
-                Some(_) => {
-                    if finished {
-                        t_string!(i18n, rematch).to_string()
-                    } else if game.own_ready() == Some(true) {
-                        t_string!(i18n, waiting_ready).to_string()
-                    } else {
-                        t_string!(i18n, ready).to_string()
-                    }
-                }
-                None => {
-                    if finished {
-                        t_string!(i18n, rematch).to_string()
-                    } else {
-                        t_string!(i18n, ready).to_string()
-                    }
-                }
+            if game.phase == GamePhase::Finished {
+                t_string!(i18n, rematch).to_string()
+            } else if session.room.get().is_some() && game.own_ready() == Some(true) {
+                t_string!(i18n, waiting_ready).to_string()
+            } else {
+                t_string!(i18n, ready).to_string()
             }
         })
     };
 
     // Зелёная пока не готов / красная у готового (повторное нажатие снимает).
     let ready_on = move || {
-        let online = session.room.get().is_some();
-        let finished = session.state.with(|game| game.phase == GamePhase::Finished);
-        !online || finished || session.state.with(LocalGame::own_ready) == Some(true)
+        session.room.get().is_none()
+            || session.state.with(|game| game.phase == GamePhase::Finished)
+            || session.state.with(LocalGame::own_ready) == Some(true)
     };
 
     let mode_checked = Signal::derive(move || session.mode.get() == MoveMode::Increase);
@@ -618,8 +585,8 @@ pub fn GamePage() -> impl IntoView {
 
                 <div class="game-actions">
                     <Button
-                        class="game-action"
-                        appearance=ButtonAppearance::Subtle
+                        class="game-action game-action--danger"
+                        appearance=ButtonAppearance::Secondary
                         on_click=on_exit
                     >
                         <span class="game-action__icon" aria-hidden="true">"⎋"</span>

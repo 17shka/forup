@@ -877,13 +877,12 @@ impl Room {
         pos: BoardCode,
     ) -> Result<Option<TeamId>, RoomError> {
         self.player_action(actor, member_id, |game, member, steps| {
-            game.increase(member, pos).map(|winner| {
+            game.increase(member, pos).inspect(|_| {
                 steps.push(ReplayStep::Move {
                     member,
                     pos,
                     increase: true,
                 });
-                winner
             })
         })
     }
@@ -895,13 +894,12 @@ impl Room {
         pos: BoardCode,
     ) -> Result<Option<TeamId>, RoomError> {
         self.player_action(actor, member_id, |game, member, steps| {
-            game.decrease(member, pos).map(|winner| {
+            game.decrease(member, pos).inspect(|_| {
                 steps.push(ReplayStep::Move {
                     member,
                     pos,
                     increase: false,
                 });
-                winner
             })
         })
     }
@@ -912,10 +910,8 @@ impl Room {
         member_id: CharacterId,
     ) -> Result<Option<TeamId>, RoomError> {
         self.player_action(actor, member_id, |game, member, steps| {
-            game.skip(member).map(|winner| {
-                steps.push(ReplayStep::Skip { member });
-                winner
-            })
+            game.skip(member)
+                .inspect(|_| steps.push(ReplayStep::Skip { member }))
         })
     }
 
@@ -925,10 +921,8 @@ impl Room {
         member_id: CharacterId,
     ) -> Result<Option<TeamId>, RoomError> {
         self.player_action(actor, member_id, |game, member, steps| {
-            game.surrender(member).map(|winner| {
-                steps.push(ReplayStep::Surrender { member });
-                winner
-            })
+            game.surrender(member)
+                .inspect(|_| steps.push(ReplayStep::Surrender { member }))
         })
     }
 

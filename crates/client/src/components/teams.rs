@@ -6,6 +6,20 @@ use thaw::{Button, ButtonAppearance, ButtonSize, Card, CardHeader, Select, Selec
 use crate::game::{Controller, GamePhase, GameSession, TeamParticipantView, TeamView};
 use crate::i18n::*;
 
+/// Обёртка write-стороны селекта: игнорирует первый программный write-back
+/// элемента при монтировании, чтобы пересборка списка не применяла значение
+/// как действие пользователя.
+fn skip_first_write(apply: impl Fn(String) + Send + Sync + 'static) -> SignalSetter<String> {
+    let ready = RwSignal::new(false);
+    SignalSetter::map(move |value: String| {
+        if !ready.get_untracked() {
+            ready.set(true);
+            return;
+        }
+        apply(value);
+    })
+}
+
 /// Single bottom panel for both the lobby and the match: team cards with their
 /// participants and controller/team editing while the game has not started.
 #[component]
@@ -19,11 +33,7 @@ pub fn TeamsPanel() -> impl IntoView {
                 <h2 class="section-title">{t!(i18n, teams)}</h2>
                 <Show when=move || {
                     session.state.with(|game| game.phase != GamePhase::Playing)
-                        && session
-                            .room
-                            .get()
-                            .map(|room| room.is_admin)
-                            .unwrap_or(true)
+                        && session.room.get().is_none_or(|room| room.is_admin)
                 }>
                     <Button
                         class="teams-panel__add"
@@ -133,12 +143,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
                 .key()
         })
     });
-    let controller_ready = RwSignal::new(false);
-    let controller_write = SignalSetter::map(move |value: String| {
-        if !controller_ready.get_untracked() {
-            controller_ready.set(true);
-            return;
-        }
+    let controller_write = skip_first_write(move |value: String| {
         let Some(controller) = Controller::from_key(&value) else {
             return;
         };
@@ -158,12 +163,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
                 .unwrap_or_default()
         })
     });
-    let team_ready = RwSignal::new(false);
-    let team_write = SignalSetter::map(move |value: String| {
-        if !team_ready.get_untracked() {
-            team_ready.set(true);
-            return;
-        }
+    let team_write = skip_first_write(move |value: String| {
         let Ok(raw) = value.parse::<u8>() else {
             return;
         };
@@ -186,11 +186,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
 
     // В онлайн-комнате убрать место может только администратор — любое,
     // включая своё: владелец остаётся оператором комнаты без места.
-    let can_remove = move || match session.room.get().map(|room| room.is_admin) {
-        Some(true) => true,
-        Some(false) => false,
-        None => true,
-    };
+    let can_remove = move || session.room.get().is_none_or(|room| room.is_admin);
 
     // Порядок ходов меняет только администратор (в офлайне — сам стол).
     let can_edit_order = can_remove;
@@ -204,12 +200,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
             .state
             .with(|game| game.seat_controller_key(participant_id))
     });
-    let seat_ready = RwSignal::new(false);
-    let seat_write = SignalSetter::map(move |value: String| {
-        if !seat_ready.get_untracked() {
-            seat_ready.set(true);
-            return;
-        }
+    let seat_write = skip_first_write(move |value: String| {
         let current = session
             .state
             .with_untracked(|game| game.seat_controller_key(participant_id));
@@ -319,12 +310,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
                 .unwrap_or_default()
         })
     });
-    let order_ready = RwSignal::new(false);
-    let order_write = SignalSetter::map(move |value: String| {
-        if !order_ready.get_untracked() {
-            order_ready.set(true);
-            return;
-        }
+    let order_write = skip_first_write(move |value: String| {
         let Some(position) = value.parse::<usize>().ok().filter(|p| *p > 0) else {
             return;
         };

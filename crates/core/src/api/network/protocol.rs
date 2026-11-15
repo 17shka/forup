@@ -160,5 +160,5 @@ pub struct RoomStateResponse {
     pub id: RoomId,
     pub me: Uuid,
     pub room: Room,
-    pub names: HashMap<u32, String>,
+    pub names: HashMap<Uuid, String>,
 }

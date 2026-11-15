@@ -17,6 +17,8 @@ use super::session::NetRoom;
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
 use crate::net::{self, NetError};
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
+use forup_core::api::game::board::prelude::GameError;
+#[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
 use forup_core::api::network::{
     BoardSizeRequest, CreateRoomRequest, DistributionRequest, ExplosionRequest, MemberRequest,
     MoveRequest, RadiusRequest, ReadyRequest, RoomError, RoomStateResponse, SeatRequest,
@@ -198,11 +200,7 @@ impl GameSession {
     /// сервером. Предсказание сработает тихо: сервер вернёт равный снапшот.
     pub fn net_rematch(&self) {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
-        match self.state.try_update(|game| game.rematch()) {
-            Some(Ok(())) => self.room_action("rematch", ()),
-            Some(Err(error)) => self.error.set(Some(error)),
-            None => {}
-        }
+        self.send_if_ok(self.state.try_update(|game| game.rematch()), "rematch", ());
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         {}
     }
@@ -274,25 +272,21 @@ impl GameSession {
     pub fn net_move(&self, pos: BoardCode, mode: MoveMode) {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
         {
-            self.flush_pending_snapshot();
-            if self.net_busy.get_untracked() || self.state.with_untracked(LocalGame::is_animating) {
+            if !self.ready_to_predict() {
                 return;
             }
             let Some(member) = self.current_net_member() else {
                 return;
             };
-            match self.state.try_update(|game| game.make_move(pos, mode)) {
-                Some(Err(error)) => self.error.set(Some(error)),
-                Some(Ok(())) => self.room_action(
-                    "move",
-                    MoveRequest {
-                        member,
-                        pos,
-                        increase: mode == MoveMode::Increase,
-                    },
-                ),
-                None => {}
-            }
+            self.send_if_ok(
+                self.state.try_update(|game| game.make_move(pos, mode)),
+                "move",
+                MoveRequest {
+                    member,
+                    pos,
+                    increase: mode == MoveMode::Increase,
+                },
+            );
         }
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         let _ = (pos, mode);
@@ -302,18 +296,17 @@ impl GameSession {
     pub fn net_skip(&self) {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
         {
-            self.flush_pending_snapshot();
-            if self.net_busy.get_untracked() || self.state.with_untracked(LocalGame::is_animating) {
+            if !self.ready_to_predict() {
                 return;
             }
             let Some(member) = self.current_net_member() else {
                 return;
             };
-            match self.state.try_update(|game| game.skip()) {
-                Some(Err(error)) => self.error.set(Some(error)),
-                Some(Ok(())) => self.room_action("skip", MemberRequest { member }),
-                None => {}
-            }
+            self.send_if_ok(
+                self.state.try_update(|game| game.skip()),
+                "skip",
+                MemberRequest { member },
+            );
         }
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         {}
@@ -323,19 +316,18 @@ impl GameSession {
     pub fn net_surrender(&self) {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
         {
-            self.flush_pending_snapshot();
-            if self.net_busy.get_untracked() || self.state.with_untracked(LocalGame::is_animating) {
+            if !self.ready_to_predict() {
                 return;
             }
             // Сдаться можно в любой момент: своё место, даже если сейчас чужой ход.
             let Some(member) = self.state.with_untracked(LocalGame::surrender_character) else {
                 return;
             };
-            match self.state.try_update(|game| game.surrender()) {
-                Some(Err(error)) => self.error.set(Some(error)),
-                Some(Ok(())) => self.room_action("surrender", MemberRequest { member }),
-                None => {}
-            }
+            self.send_if_ok(
+                self.state.try_update(|game| game.surrender()),
+                "surrender",
+                MemberRequest { member },
+            );
         }
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         {}
@@ -347,15 +339,10 @@ impl GameSession {
     pub fn net_end_game(&self) {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
         {
-            self.flush_pending_snapshot();
-            if self.net_busy.get_untracked() || self.state.with_untracked(LocalGame::is_animating) {
+            if !self.ready_to_predict() {
                 return;
             }
-            match self.state.try_update(|game| game.end_game()) {
-                Some(Err(error)) => self.error.set(Some(error)),
-                Some(Ok(())) => self.room_action("end", ()),
-                None => {}
-            }
+            self.send_if_ok(self.state.try_update(|game| game.end_game()), "end", ());
         }
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
         {}
@@ -556,6 +543,31 @@ impl GameSession {
                 None
             }
         })
+    }
+
+    /// Готов ли стол к предсказанию хода: отложенный снапшот применён,
+    /// сеть свободна и анимация взрывов не идёт.
+    #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
+    fn ready_to_predict(&self) -> bool {
+        self.flush_pending_snapshot();
+        !self.net_busy.get_untracked() && !self.state.with_untracked(LocalGame::is_animating)
+    }
+
+    /// Применяет результат локального предсказания: ошибка показывается
+    /// тостом, успех отправляется серверу; `None` (залоченный сигнал)
+    /// тихо игнорируется.
+    #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
+    fn send_if_ok(
+        &self,
+        result: Option<Result<(), GameError>>,
+        suffix: &str,
+        body: impl Serialize + 'static,
+    ) {
+        match result {
+            Some(Err(error)) => self.error.set(Some(error)),
+            Some(Ok(())) => self.room_action(suffix, body),
+            None => {}
+        }
     }
 }
 

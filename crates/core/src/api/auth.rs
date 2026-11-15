@@ -351,10 +351,10 @@ mod native {
             let write = self.database.begin_write().map_err(database_error)?;
             {
                 let emails = write.open_table(EMAILS).map_err(database_error)?;
-                if let Some(existing) = emails.get(email.as_str()).map_err(database_error)? {
-                    if existing.value() != id.get() {
-                        return Err(AuthError::EmailTaken);
-                    }
+                if let Some(existing) = emails.get(email.as_str()).map_err(database_error)?
+                    && existing.value() != id.get()
+                {
+                    return Err(AuthError::EmailTaken);
                 }
             }
             {
