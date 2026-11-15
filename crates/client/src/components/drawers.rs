@@ -20,7 +20,11 @@ enum AuthMode {
 }
 
 #[component]
-pub fn ProfileDrawer(open: RwSignal<bool>) -> impl IntoView {
+pub fn ProfileDrawer(
+    open: RwSignal<bool>,
+    /// Side the drawer slides in from: bottom in portrait, right in landscape.
+    position: Signal<DrawerPosition>,
+) -> impl IntoView {
     let i18n = use_i18n();
     let auth = AuthState::expect();
 
@@ -28,7 +32,7 @@ pub fn ProfileDrawer(open: RwSignal<bool>) -> impl IntoView {
         <OverlayDrawer
             class="app-drawer"
             open=open
-            position=DrawerPosition::Bottom
+            position=position
             size=DrawerSize::Small
         >
             <DrawerHeader>
@@ -393,7 +397,11 @@ fn ProfilePanel() -> impl IntoView {
 }
 
 #[component]
-pub fn SettingsDrawer(open: RwSignal<bool>) -> impl IntoView {
+pub fn SettingsDrawer(
+    open: RwSignal<bool>,
+    /// Side the drawer slides in from: bottom in portrait, right in landscape.
+    position: Signal<DrawerPosition>,
+) -> impl IntoView {
     let i18n = use_i18n();
     let ctx = Settings::expect();
     let theme_value = ctx.theme_choice;
@@ -412,7 +420,7 @@ pub fn SettingsDrawer(open: RwSignal<bool>) -> impl IntoView {
         <OverlayDrawer
             class="app-drawer"
             open=open
-            position=DrawerPosition::Bottom
+            position=position
             size=DrawerSize::Small
         >
             <DrawerHeader>

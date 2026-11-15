@@ -2,6 +2,8 @@ use leptos::prelude::*;
 use leptos_meta::{MetaTags, Stylesheet, Title, provide_meta_context};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
+use leptos_use::use_media_query;
+use thaw::DrawerPosition;
 
 use crate::auth::AuthState;
 use crate::components::{BottomNav, ProfileDrawer, SettingsDrawer};
@@ -72,6 +74,17 @@ fn AppShell() -> impl IntoView {
     GameSession::provide();
     AuthState::provide();
 
+    // In landscape the profile/settings drawers slide in from the right,
+    // next to the nav rail, instead of from the bottom.
+    let is_landscape = use_media_query("(orientation: landscape)");
+    let drawer_position = Signal::derive(move || {
+        if is_landscape.get() {
+            DrawerPosition::Right
+        } else {
+            DrawerPosition::Bottom
+        }
+    });
+
     view! {
         <div class="app-shell">
             <main class="app-main">
@@ -82,8 +95,8 @@ fn AppShell() -> impl IntoView {
             </main>
 
             <BottomNav profile_open settings_open/>
-            <ProfileDrawer open=profile_open/>
-            <SettingsDrawer open=settings_open/>
+            <ProfileDrawer open=profile_open position=drawer_position/>
+            <SettingsDrawer open=settings_open position=drawer_position/>
         </div>
     }
 }

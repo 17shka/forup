@@ -118,6 +118,48 @@ body {
     gap: 10px;
 }
 
+/* Игра собрана из двух колонок: поле хода и боковая панель управления.
+   В портрете колонки «расплющиваются» (display: contents), а прежний
+   одноколоночный порядок восстанавливается через flex order.
+   В ландшафте (media query ниже) колонки встают рядом. */
+.game-column {
+    display: contents;
+}
+
+/* Прокручиваемая часть панели в портрете тоже «расплющивается»,
+   порядок элементов задаёт flex order ниже. */
+.game-column__scroll {
+    display: contents;
+}
+
+.game-page .room-players {
+    order: 1;
+}
+
+.game-page .turn-banner {
+    order: 2;
+}
+
+.game-page .teams-panel {
+    order: 3;
+}
+
+.game-page .board-wrapper {
+    order: 4;
+}
+
+.game-page .game-actions {
+    order: 5;
+}
+
+.game-page .room-mode {
+    order: 6;
+}
+
+.game-page .game-settings {
+    order: 7;
+}
+
 .turn-banner {
     display: flex;
     align-items: center;
@@ -1262,4 +1304,102 @@ body {
 
 .explosion-toggle__text {
     line-height: 1;
+}
+
+/* Ландшафт (ширина больше высоты): поле слева, панель стола справа,
+   навигация Профиль/Настройки — вертикальной колонкой у правого края. */
+@media (orientation: landscape) {
+    .page {
+        min-height: 100dvh;
+    }
+
+    .app-main {
+        padding-bottom: 0;
+        padding-right: calc(76px + env(safe-area-inset-right));
+    }
+
+    .bottom-nav {
+        top: 0;
+        bottom: 0;
+        left: auto;
+        flex-direction: column;
+        justify-content: flex-end;
+        width: calc(76px + env(safe-area-inset-right));
+        padding: 12px 8px;
+        border-top: 0;
+        border-left: 1px solid var(--colorNeutralStroke2);
+    }
+
+    .thaw-button.nav-item {
+        flex: 0 0 auto;
+    }
+
+    .game-page {
+        height: 100dvh;
+        flex-direction: row;
+        align-items: stretch;
+        gap: 16px;
+    }
+
+    .game-column {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-height: 0;
+        min-width: 0;
+    }
+
+    .game-column--board {
+        flex: 1 1 auto;
+        justify-content: center;
+    }
+
+    .game-column--side {
+        flex: 0 0 auto;
+        width: clamp(280px, 36vw, 400px);
+    }
+
+    /* Прокручивается только верхняя часть панели с игроками, ходом,
+       командами и настройками. */
+    .game-column__scroll {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+    }
+
+    /* Дети области прокрутки не должны сжиматься: у thaw-card задан
+       overflow: hidden, из-за чего flex-shrink обрезал бы содержимое
+       карточки (например, настройки игры) вместо появления прокрутки. */
+    .game-column__scroll > * {
+        flex-shrink: 0;
+    }
+
+    /* Кнопки действий закреплены внизу панели и не прокручиваются. */
+    .game-column--side .game-actions {
+        order: 8;
+        flex: 0 0 auto;
+        padding-top: 2px;
+    }
+
+    /* Поле занимает всё свободное место колонки, но обязано влезать
+       и по высоте: ограничиваем ширину через пропорцию
+       --board-cols/--board-rows, задаваемую инлайном. */
+    .board {
+        width: min(
+            100%,
+            calc((100dvh - 48px) * var(--board-cols, 8) / var(--board-rows, 8))
+        );
+    }
+}
+
+/* Ландшафтная версия drawer'ов Профиля/Настроек: выезжают справа
+   (позиция переключается реактивно в app.rs), на всю высоту и шире. */
+.thaw-overlay-drawer.app-drawer.thaw-overlay-drawer--position-right {
+    width: min(420px, 92vw);
+    max-height: 100dvh;
 }

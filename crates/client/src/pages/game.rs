@@ -422,257 +422,275 @@ pub fn GamePage() -> impl IntoView {
 
     view! {
         <div class="page game-page">
-
-            <Show when=move || session.room.get().is_some()>
-                <RoomPlayersPanel/>
-            </Show>
-
-            <TeamsPanel/>
-
-            <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
-                <div class=banner_class>
-                    <span class=turn_dot_class style=turn_dot_style></span>
-                    <span class="turn-banner__text">{turn_text}</span>
-                    <div class="turn-banner__side">
-                        <Show
-                            when=move || {
-                                session.state.with(|game| {
-                                    game.phase == GamePhase::Playing
-                                        && !game.is_choosing_start_cell()
-                                        && game.is_human_turn()
-                                })
-                            }
-                        >
-                            <div class="mode-toggle" role="group">
-                                <ModeCheckbox
-                                    checked=mode_checked
-                                    set_checked=set_mode
-                                    label=mode_label
-                                    disabled=mode_disabled
-                                />
-                            </div>
-                        </Show>
-                    </div>
-                </div>
-            </Show>
-
-            <div class="board-wrapper">
-                {move || {
-                    let size = board_size.get();
-                    let rotation = session.rotation.get() % 4;
-                    let board_width = size.width().get();
-                    let board_height = size.height().get();
-                    let (cols, rows) = if rotation.is_multiple_of(2) {
-                        (board_width, board_height)
-                    } else {
-                        (board_height, board_width)
-                    };
-                    let cell_count = usize::from(cols) * usize::from(rows);
-                    let cells = (0..cell_count)
-                        .map(|index| {
-                            let x = (index % usize::from(cols)) as u8;
-                            let y = (index / usize::from(cols)) as u8;
-                            let slot = rotated_slot(rotation, x, y, board_width, board_height);
-                            let pos = BoardCode::from_slot(slot);
-                            let mode = session.mode;
-
-                            let class = move || session.state.with(|game| cell_class(game, pos));
-                            let style = move || session.state.with(|game| cell_style(game, pos));
-                            let value = move || session.state.with(|game| cell_value(game, pos));
-                            let disabled = move || {
-                                let selected = mode.get();
-                                session.state.with(|game| {
-                                    // Клетки заблокированы, пока идёт анимация взрывов.
-                                    if game.is_animating() {
-                                        return true;
-                                    }
-                                    // A starting Decrease just claims an empty
-                                    // cell, so the usual checks do not apply.
-                                    if selected == MoveMode::Decrease
-                                        && game.is_choosing_start_cell()
-                                    {
-                                        return !game.can_move_to(pos);
-                                    }
-                                    let empty_decrease = selected == MoveMode::Decrease
-                                        && game
-                                            .game
-                                            .board()
-                                            .get(pos)
-                                            .is_some_and(|cell| cell.value <= 0);
-                                    !game.can_move_to(pos)
-                                        || empty_decrease
-                                        || (selected == MoveMode::Decrease && !game.can_decrease())
-                                })
-                            };
-                            let on_click = move |_| {
-                                let selected = mode.get_untracked();
-                                if session.room.get_untracked().is_some() {
-                                    session.net_move(pos, selected);
-                                } else {
-                                    session.dispatch(move |game| game.make_move(pos, selected));
-                                }
-                            };
-
-                            view! {
-                                <button
-                                    type="button"
-                                    class=class
-                                    style=style
-                                    disabled=disabled
-                                    on:click=on_click
-                                >
-                                    <span class="board-cell__value">{value}</span>
-                                </button>
-                            }
-                        })
-                        .collect_view();
-
-                    view! {
-                        <div
-                            class="board"
-                            style=format!(
-                                "--board-cols: {cols}; --board-rows: {rows}; aspect-ratio: {cols} / {rows};"
-                            )
-                        >
-                            {cells}
-                        </div>
-                    }
-                }}
-            </div>
-
-            <div class="game-actions">
-                <Button
-                    class="game-action"
-                    appearance=ButtonAppearance::Subtle
-                    on_click=on_exit
-                >
-                    <span class="game-action__icon" aria-hidden="true">"⎋"</span>
-                    <span class="game-action__label">{t!(i18n, exit)}</span>
-                </Button>
-                <Show when=move || session.state.with(LocalGame::has_playable_seat)>
-                    <Button
-                        class="game-action game-action--danger"
-                        appearance=ButtonAppearance::Secondary
-                        disabled=move || !session.state.with(LocalGame::can_surrender)
-                        on_click=on_surrender
-                    >
-                        <span class="game-action__icon" aria-hidden="true">"🏳"</span>
-                        <span class="game-action__label">{t!(i18n, surrender)}</span>
-                    </Button>
-                </Show>
-                <Show when=move || {
-                    session.state.with(|game| {
-                        game.phase == GamePhase::Playing
-                            && !game.has_playable_seat()
-                            && is_admin()
-                    })
-                }>
-                    <Button
-                        class="game-action game-action--danger"
-                        appearance=ButtonAppearance::Secondary
-                        on_click=on_finish
-                    >
-                        <span class="game-action__icon" aria-hidden="true">"🏁"</span>
-                        <span class="game-action__label">{t!(i18n, finish_game)}</span>
-                    </Button>
-                </Show>
-                <Show when=move || session.state.with(LocalGame::is_human_turn)>
-                    <Button
-                        class="game-action"
-                        appearance=ButtonAppearance::Secondary
-                        disabled=move || !session.state.with(LocalGame::can_skip)
-                        on_click=on_skip
-                    >
-                        <span class="game-action__icon" aria-hidden="true">"⏭"</span>
-                        <span class="game-action__label">{t!(i18n, skip)}</span>
-                    </Button>
-                </Show>
-                <Show when=move || session.state.with(|game| game.phase != GamePhase::Playing)>
-                    <Button
-                        class=Signal::derive(move || {
-                            if ready_on() {
-                                "game-action game-action--ready game-action--ready-on"
-                            } else {
-                                "game-action game-action--ready game-action--ready-off"
-                            }
-                            .to_string()
-                        })
-                        appearance=ButtonAppearance::Primary
-                        size=ButtonSize::Medium
-                        on_click=on_ready
-                    >
-                        <span class="game-action__icon" aria-hidden="true">"✓"</span>
-                        <span class="game-action__label">{ready_label}</span>
-                    </Button>
-                </Show>
-                <Button
-                    class="game-action"
-                    appearance=ButtonAppearance::Secondary
-                    on_click=move |_| session.rotate_board()
-                >
-                    <span class="game-action__icon" aria-hidden="true">"⟳"</span>
-                    <span class="game-action__label">{t!(i18n, rotate_board)}</span>
-                </Button>
-            </div>
-
-            // Выбор режима и настройки — только когда стол локальный или
-            // у игрока есть права администратора комнаты.
-            <Show when=move || {
-                session.state.with(|game| game.phase == GamePhase::Lobby)
-                    && (session.room.get().is_none()
-                        || session.room.get().is_some_and(|room| room.is_admin))
-            }>
-                <div class="room-mode" role="group">
+            // Две колонки: игровое поле и панель управления столом.
+            // Баннер хода — в панели, над командами.
+            // В портрете колонки «расплющиваются» (display: contents), а
+            // прежний порядок восстанавливается CSS-свойством order.
+            <div class="game-column game-column--board">
+                <div class="board-wrapper">
                     {move || {
-                        let offline_active = session.room.get().is_none();
-                        view! {
-                            <button
-                                type="button"
-                                class=if offline_active {
-                                    "room-mode__button room-mode__button--active"
-                                } else {
-                                    "room-mode__button"
-                                }
-                                on:click=move |_| {
+                        let size = board_size.get();
+                        let rotation = session.rotation.get() % 4;
+                        let board_width = size.width().get();
+                        let board_height = size.height().get();
+                        let (cols, rows) = if rotation.is_multiple_of(2) {
+                            (board_width, board_height)
+                        } else {
+                            (board_height, board_width)
+                        };
+                        let cell_count = usize::from(cols) * usize::from(rows);
+                        let cells = (0..cell_count)
+                            .map(|index| {
+                                let x = (index % usize::from(cols)) as u8;
+                                let y = (index / usize::from(cols)) as u8;
+                                let slot =
+                                    rotated_slot(rotation, x, y, board_width, board_height);
+                                let pos = BoardCode::from_slot(slot);
+                                let mode = session.mode;
+
+                                let class =
+                                    move || session.state.with(|game| cell_class(game, pos));
+                                let style =
+                                    move || session.state.with(|game| cell_style(game, pos));
+                                let value =
+                                    move || session.state.with(|game| cell_value(game, pos));
+                                let disabled = move || {
+                                    let selected = mode.get();
+                                    session.state.with(|game| {
+                                        // Клетки заблокированы, пока идёт анимация взрывов.
+                                        if game.is_animating() {
+                                            return true;
+                                        }
+                                        // A starting Decrease just claims an empty
+                                        // cell, so the usual checks do not apply.
+                                        if selected == MoveMode::Decrease
+                                            && game.is_choosing_start_cell()
+                                        {
+                                            return !game.can_move_to(pos);
+                                        }
+                                        let empty_decrease = selected == MoveMode::Decrease
+                                            && game
+                                                .game
+                                                .board()
+                                                .get(pos)
+                                                .is_some_and(|cell| cell.value <= 0);
+                                        !game.can_move_to(pos)
+                                            || empty_decrease
+                                            || (selected == MoveMode::Decrease
+                                                && !game.can_decrease())
+                                    })
+                                };
+                                let on_click = move |_| {
+                                    let selected = mode.get_untracked();
                                     if session.room.get_untracked().is_some() {
-                                        // Переключение в офлайн сохраняет стол:
-                                        // участники и настройки не меняются.
-                                        session.go_offline();
-                                    }
-                                }
-                            >
-                                {t!(i18n, offline)}
-                            </button>
-                            <button
-                                type="button"
-                                class=if offline_active {
-                                    "room-mode__button"
-                                } else {
-                                    "room-mode__button room-mode__button--active"
-                                }
-                                disabled=move || auth.user.get().is_none()
-                                title=move || {
-                                    if auth.user.get().is_some() {
-                                        String::new()
+                                        session.net_move(pos, selected);
                                     } else {
-                                        t_string!(i18n, multiplayer_requires_account).to_string()
+                                        session.dispatch(move |game| {
+                                            game.make_move(pos, selected)
+                                        });
                                     }
+                                };
+
+                                view! {
+                                    <button
+                                        type="button"
+                                        class=class
+                                        style=style
+                                        disabled=disabled
+                                        on:click=on_click
+                                    >
+                                        <span class="board-cell__value">{value}</span>
+                                    </button>
                                 }
-                                on:click=move |_| {
-                                    if session.room.get_untracked().is_none() {
-                                        let token = auth.token.get_untracked();
-                                        session.connect_new_room(&token, true, || {});
-                                    }
-                                }
+                            })
+                            .collect_view();
+
+                        view! {
+                            <div
+                                class="board"
+                                style=format!(
+                                    "--board-cols: {cols}; --board-rows: {rows}; aspect-ratio: {cols} / {rows};"
+                                )
                             >
-                                {t!(i18n, online)}
-                            </button>
+                                {cells}
+                            </div>
                         }
                     }}
                 </div>
-            </Show>
+            </div>
 
-            <GameSettingsPanel/>
+            <div class="game-column game-column--side">
+                // Прокручиваемая верхняя часть панели: игроки, ход, команды
+                // и настройки. Кнопки действий закреплены снизу.
+                <div class="game-column__scroll">
+                    <Show when=move || session.room.get().is_some()>
+                        <RoomPlayersPanel/>
+                    </Show>
+
+                    <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
+                        <div class=banner_class>
+                            <span class=turn_dot_class style=turn_dot_style></span>
+                            <span class="turn-banner__text">{turn_text}</span>
+                            <div class="turn-banner__side">
+                                <Show
+                                    when=move || {
+                                        session.state.with(|game| {
+                                            game.phase == GamePhase::Playing
+                                                && !game.is_choosing_start_cell()
+                                                && game.is_human_turn()
+                                        })
+                                    }
+                                >
+                                    <div class="mode-toggle" role="group">
+                                        <ModeCheckbox
+                                            checked=mode_checked
+                                            set_checked=set_mode
+                                            label=mode_label
+                                            disabled=mode_disabled
+                                        />
+                                    </div>
+                                </Show>
+                            </div>
+                        </div>
+                    </Show>
+
+                    <TeamsPanel/>
+
+                    // Выбор режима и настройки — только когда стол локальный или
+                    // у игрока есть права администратора комнаты.
+                    <Show when=move || {
+                        session.state.with(|game| game.phase == GamePhase::Lobby)
+                            && (session.room.get().is_none()
+                                || session.room.get().is_some_and(|room| room.is_admin))
+                    }>
+                        <div class="room-mode" role="group">
+                            {move || {
+                                let offline_active = session.room.get().is_none();
+                                view! {
+                                    <button
+                                        type="button"
+                                        class=if offline_active {
+                                            "room-mode__button room-mode__button--active"
+                                        } else {
+                                            "room-mode__button"
+                                        }
+                                        on:click=move |_| {
+                                            if session.room.get_untracked().is_some() {
+                                                // Переключение в офлайн сохраняет стол:
+                                                // участники и настройки не меняются.
+                                                session.go_offline();
+                                            }
+                                        }
+                                    >
+                                        {t!(i18n, offline)}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class=if offline_active {
+                                            "room-mode__button"
+                                        } else {
+                                            "room-mode__button room-mode__button--active"
+                                        }
+                                        disabled=move || auth.user.get().is_none()
+                                        title=move || {
+                                            if auth.user.get().is_some() {
+                                                String::new()
+                                            } else {
+                                                t_string!(i18n, multiplayer_requires_account).to_string()
+                                            }
+                                        }
+                                        on:click=move |_| {
+                                            if session.room.get_untracked().is_none() {
+                                                let token = auth.token.get_untracked();
+                                                session.connect_new_room(&token, true, || {});
+                                            }
+                                        }
+                                    >
+                                        {t!(i18n, online)}
+                                    </button>
+                                }
+                            }}
+                        </div>
+                    </Show>
+
+                    <GameSettingsPanel/>
+                </div>
+
+                <div class="game-actions">
+                    <Button
+                        class="game-action"
+                        appearance=ButtonAppearance::Subtle
+                        on_click=on_exit
+                    >
+                        <span class="game-action__icon" aria-hidden="true">"⎋"</span>
+                        <span class="game-action__label">{t!(i18n, exit)}</span>
+                    </Button>
+                    <Show when=move || session.state.with(LocalGame::has_playable_seat)>
+                        <Button
+                            class="game-action game-action--danger"
+                            appearance=ButtonAppearance::Secondary
+                            disabled=move || !session.state.with(LocalGame::can_surrender)
+                            on_click=on_surrender
+                        >
+                            <span class="game-action__icon" aria-hidden="true">"🏳"</span>
+                            <span class="game-action__label">{t!(i18n, surrender)}</span>
+                        </Button>
+                    </Show>
+                    <Show when=move || {
+                        session.state.with(|game| {
+                            game.phase == GamePhase::Playing
+                                && !game.has_playable_seat()
+                                && is_admin()
+                        })
+                    }>
+                        <Button
+                            class="game-action game-action--danger"
+                            appearance=ButtonAppearance::Secondary
+                            on_click=on_finish
+                        >
+                            <span class="game-action__icon" aria-hidden="true">"🏁"</span>
+                            <span class="game-action__label">{t!(i18n, finish_game)}</span>
+                        </Button>
+                    </Show>
+                    <Show when=move || session.state.with(LocalGame::is_human_turn)>
+                        <Button
+                            class="game-action"
+                            appearance=ButtonAppearance::Secondary
+                            disabled=move || !session.state.with(LocalGame::can_skip)
+                            on_click=on_skip
+                        >
+                            <span class="game-action__icon" aria-hidden="true">"⏭"</span>
+                            <span class="game-action__label">{t!(i18n, skip)}</span>
+                        </Button>
+                    </Show>
+                    <Show when=move || session.state.with(|game| game.phase != GamePhase::Playing)>
+                        <Button
+                            class=Signal::derive(move || {
+                                if ready_on() {
+                                    "game-action game-action--ready game-action--ready-on"
+                                } else {
+                                    "game-action game-action--ready game-action--ready-off"
+                                }
+                                .to_string()
+                            })
+                            appearance=ButtonAppearance::Primary
+                            size=ButtonSize::Medium
+                            on_click=on_ready
+                        >
+                            <span class="game-action__icon" aria-hidden="true">"✓"</span>
+                            <span class="game-action__label">{ready_label}</span>
+                        </Button>
+                    </Show>
+                    <Button
+                        class="game-action"
+                        appearance=ButtonAppearance::Secondary
+                        on_click=move |_| session.rotate_board()
+                    >
+                        <span class="game-action__icon" aria-hidden="true">"⟳"</span>
+                        <span class="game-action__label">{t!(i18n, rotate_board)}</span>
+                    </Button>
+                </div>
+            </div>
         </div>
     }
 }
