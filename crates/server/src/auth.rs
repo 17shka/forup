@@ -1,69 +1,19 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+//! HTTP-обработчики аккаунтов: регистрация, вход, выход, профиль.
 
 use axum::{
     Router,
     body::Bytes,
     extract::Extension,
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION, header::CONTENT_TYPE},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, patch, post},
 };
 use forup_core::api::auth::{
-    ApiError, AuthError, AuthResponse, LoginRequest, RegisterRequest, UpdateProfileRequest, UserId,
-    UserResponse, UserStore, generate_token,
+    AuthError, AuthResponse, LoginRequest, RegisterRequest, UpdateProfileRequest, UserResponse,
 };
-use forup_core::api::network::{RoomDirectory, RoomStore};
-use serde::{Serialize, de::DeserializeOwned};
 
-const BINARY: &str = "application/octet-stream";
-
-/// Shared state for the account endpoints: the persistent user store and the
-/// in-memory sessions issued on login.
-#[derive(Clone)]
-pub struct ApiState {
-    pub(crate) users: UserStore,
-    sessions: Arc<Mutex<HashMap<String, u32>>>,
-    pub(crate) rooms: Arc<Mutex<RoomDirectory>>,
-    pub(crate) room_store: RoomStore,
-}
-
-impl ApiState {
-    pub fn new(users: UserStore, rooms: Arc<Mutex<RoomDirectory>>, room_store: RoomStore) -> Self {
-        Self {
-            users,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            rooms,
-            room_store,
-        }
-    }
-
-    fn issue_token(&self, user_id: u32) -> String {
-        let token = generate_token();
-        let mut sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.insert(token.clone(), user_id);
-        token
-    }
-
-    fn user_for_token(&self, token: &str) -> Option<UserId> {
-        let sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.get(token).copied().and_then(UserId::new)
-    }
-
-    fn revoke_token(&self, token: &str) {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.remove(token);
-    }
-}
+use crate::http::{api_error, decode, encode};
+use crate::state::{ApiState, authenticated, bearer_token};
 
 /// Account endpoints merged into the main app router.
 pub fn router<S>(state: ApiState) -> Router<S>
@@ -76,7 +26,6 @@ where
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
         .route("/api/auth/profile", patch(update_profile))
-        .merge(crate::rooms::router(state.clone()))
         .layer(Extension(state))
 }
 
@@ -171,51 +120,6 @@ async fn update_profile(
         Ok(None) => api_error(StatusCode::UNAUTHORIZED, "account not found"),
         Err(error) => auth_error_response(error),
     }
-}
-
-pub(crate) fn authenticated(state: &ApiState, headers: &HeaderMap) -> Result<UserId, Response> {
-    let token = bearer_token(headers)
-        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "authentication required"))?;
-    state
-        .user_for_token(&token)
-        .ok_or_else(|| api_error(StatusCode::UNAUTHORIZED, "session expired"))
-}
-
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::to_owned)
-}
-
-pub(crate) fn decode<T: DeserializeOwned>(body: &Bytes) -> Result<T, Response> {
-    postcard::from_bytes(body.as_ref()).map_err(|error| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            format!("invalid request body: {error}"),
-        )
-    })
-}
-
-pub(crate) fn encode<T: Serialize>(status: StatusCode, value: &T) -> Response {
-    match postcard::to_allocvec(value) {
-        Ok(body) => (status, [(CONTENT_TYPE, BINARY)], body).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("response encoding error: {error}"),
-        )
-            .into_response(),
-    }
-}
-
-fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
-    encode(
-        status,
-        &ApiError {
-            error: message.into(),
-        },
-    )
 }
 
 fn auth_error_response(error: AuthError) -> Response {

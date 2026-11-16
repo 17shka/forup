@@ -1,4 +1,4 @@
-use forup_core::api::game::board::prelude::BoardCode;
+use forup_core::api::game::prelude::BoardCode;
 use leptos::prelude::*;
 use thaw::{Card, CardHeader, Slider, Switch};
 

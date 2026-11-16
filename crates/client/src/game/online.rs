@@ -6,18 +6,19 @@
 //! Все сетевые зависимости опциональны (wasmgate), поэтому методы существуют
 //! на нативных сборках как заглушки.
 
-use forup_core::api::game::board::prelude::{BoardCode, CharacterId, MemberId, TeamId};
+use forup_core::api::game::prelude::{BoardCode, CharacterId, MemberId, TeamId};
 use forup_core::api::network::RoomId;
 use leptos::prelude::*;
 
-use super::session::{GameSession, LocalGame, MoveMode};
+use super::local::{LocalGame, MoveMode};
+use super::session::GameSession;
 
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
 use super::session::NetRoom;
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
 use crate::net::{self, NetError};
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
-use forup_core::api::game::board::prelude::GameError;
+use forup_core::api::game::prelude::GameError;
 #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
 use forup_core::api::network::{
     BoardSizeRequest, CreateRoomRequest, DistributionRequest, ExplosionRequest, MemberRequest,

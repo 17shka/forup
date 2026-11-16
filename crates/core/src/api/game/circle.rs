@@ -13,7 +13,7 @@
 //! 6 5 4
 //! ```
 
-use crate::api::game::board::BoardCode;
+use crate::api::game::BoardCode;
 
 pub mod prelude {
     pub use super::{

@@ -1,4 +1,4 @@
-use forup_core::api::game::board::prelude::{BoardCode, GameError};
+use forup_core::api::game::prelude::{BoardCode, GameError, TeamId};
 use forup_core::api::network::RoomError;
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
@@ -8,8 +8,8 @@ use thaw::{
 };
 
 use crate::auth::AuthState;
-use crate::components::{GameSettingsPanel, ModeCheckbox, RoomPlayersPanel, TeamsPanel};
-use crate::game::{Controller, GamePhase, GameSession, LocalGame, MoveMode};
+use crate::components::{GameSettingsPanel, RoomPlayersPanel, TeamsPanel};
+use crate::game::{BoardView, Controller, GamePhase, GameSession, LocalGame, MoveMode, SlotMask};
 use crate::i18n::*;
 use crate::net::NetError;
 use crate::settings::Settings;
@@ -38,13 +38,13 @@ fn cell_animation_class(tick: u64, growing: bool) -> &'static str {
     }
 }
 
-fn cell_class(state: &LocalGame, pos: BoardCode) -> String {
+fn cell_class(view: &BoardView, pos: BoardCode, legal: SlotMask) -> String {
     let mut class = String::from("board-cell");
-    if let Some(cell) = state.game.board().get(pos)
+    if let Some(cell) = view.board.get(pos)
         && cell.owner.is_some()
     {
         class.push_str(" board-cell--owned");
-        if state.phase == GamePhase::Playing && cell.owner != state.current_team() {
+        if view.phase == GamePhase::Playing && cell.owner != view.current_team {
             // Ход другой команды: её клетки показываются тусклее.
             class.push_str(" board-cell--dim");
         }
@@ -52,35 +52,37 @@ fn cell_class(state: &LocalGame, pos: BoardCode) -> String {
             class.push_str(" board-cell--charged");
         }
     }
-    if state.can_move_to(pos) {
+    if legal.contains(pos.slot()) {
         class.push_str(" board-cell--legal");
     }
-    let delta = state.change_at(pos);
+    let delta = view.change_at(pos);
     if delta != 0 {
         class.push(' ');
-        class.push_str(cell_animation_class(state.animation_tick, delta > 0));
+        class.push_str(cell_animation_class(view.animation_tick, delta > 0));
     }
     class
 }
 
 /// The cell colour is the team hue; only its brightness changes with the
 /// value (5% per point, so `4` is 20% lighter and `-2` is 10% darker).
-fn cell_style(state: &LocalGame, pos: BoardCode) -> String {
-    let Some(cell) = state.game.board().get(pos) else {
+fn cell_style(view: &BoardView, pos: BoardCode, hues: &[(TeamId, u16)]) -> String {
+    let Some(cell) = view.board.get(pos) else {
         return String::new();
     };
     let Some(owner) = cell.owner else {
         return String::new();
     };
-    let hue = state.team_hue(owner);
+    let hue = hues
+        .iter()
+        .find(|&&(team, _)| team == owner)
+        .map(|&(_, hue)| hue)
+        .unwrap_or(0);
     let brightness = (1.0 + 0.05 * f32::from(cell.value)).clamp(0.5, 1.8);
     format!("--team-hue: {hue}; --cell-brightness: {brightness:.2};")
 }
 
-fn cell_value(state: &LocalGame, pos: BoardCode) -> String {
-    state
-        .game
-        .board()
+fn cell_value(view: &BoardView, pos: BoardCode) -> String {
+    view.board
         .get(pos)
         .filter(|cell| cell.value > 0)
         .map(|cell| cell.value.to_string())
@@ -99,6 +101,20 @@ pub fn GamePage() -> impl IntoView {
     // grid is rebuilt only when the size changes, while every cell stays bound
     // to the reactive game state.
     let board_size = Memo::new(move |_| session.state.with(|game| game.board_size()));
+
+    // Реактивные производные: считаются один раз на изменение состояния, а не
+    // для каждой клетки доски. Иначе перерисовка большой доски была бы
+    // квадратичной (легальные клетки, оттенки команд, доступность уменьшения).
+    //
+    // `board_view` намеренно не включает настройки: смена безопасного радиуса
+    // не меняет снимок, поэтому значение мемо остаётся равным и ни одна из
+    // сотен клеток не перерисовывается на тик ползунка.
+    let board_view = Memo::new(move |_| session.state.with(LocalGame::board_view));
+    let legal_targets = Memo::new(move |_| session.state.with(LocalGame::legal_targets));
+    let team_hues = Memo::new(move |_| session.state.with(LocalGame::team_hues));
+    let can_decrease = Memo::new(move |_| session.state.with(LocalGame::can_decrease));
+    let choosing_start = Memo::new(move |_| session.state.with(LocalGame::is_choosing_start_cell));
+    let animating = Memo::new(move |_| session.state.with(LocalGame::is_animating));
 
     let turn_text = move || {
         session.state.with(|game| match game.phase {
@@ -121,17 +137,19 @@ pub fn GamePage() -> impl IntoView {
         })
     };
 
-    let turn_dot_class = move || {
+    // Текст хода сам несёт цвет команды текущего участника — отдельная
+    // точка-индикатор не нужна.
+    let turn_text_class = move || {
         session.state.with(|game| {
             if game.current_team().is_some() {
-                "turn-banner__dot"
+                "turn-banner__text turn-banner__text--team"
             } else {
-                "turn-banner__dot turn-banner__dot--idle"
+                "turn-banner__text"
             }
         })
     };
 
-    let turn_dot_style = move || {
+    let turn_text_style = move || {
         session.state.with(|game| {
             game.current_team()
                 .map(|team| format!("--team-hue: {};", game.team_hue(team)))
@@ -314,30 +332,35 @@ pub fn GamePage() -> impl IntoView {
             || session.state.with(LocalGame::own_ready) == Some(true)
     };
 
-    let mode_checked = Signal::derive(move || session.mode.get() == MoveMode::Increase);
-    let set_mode = SignalSetter::map(move |checked: bool| {
-        let target = if checked {
-            MoveMode::Increase
-        } else {
-            MoveMode::Decrease
-        };
-        // Уменьшение недоступно (нет подходящих клеток): чекбокс не выключается,
-        // как раньше была заблокирована кнопка «−Уменьшить».
-        if target == MoveMode::Decrease && !session.state.with_untracked(LocalGame::can_decrease) {
-            return;
+    // Переключатель режима хода — сегментированный, как Lossy/Lossless в
+    // настройках партии: активная половина подсвечена градиентом своего цвета.
+    let decrease_label = move || t_string!(i18n, decrease).to_string();
+    let increase_label = move || t_string!(i18n, increase).to_string();
+    let decrease_class = move || {
+        let mut class = String::from("mode-toggle__option mode-toggle__option--decrease");
+        if session.mode.get() == MoveMode::Decrease {
+            class.push_str(" mode-toggle__option--active");
         }
-        session.mode.set(target);
-    });
-    let mode_disabled = Signal::derive(move || {
-        session.mode.get() == MoveMode::Increase && !session.state.with(LocalGame::can_decrease)
-    });
-    let mode_label = Signal::derive(move || {
+        class
+    };
+    let increase_class = move || {
+        let mut class = String::from("mode-toggle__option mode-toggle__option--increase");
         if session.mode.get() == MoveMode::Increase {
-            t_string!(i18n, increase).to_string()
-        } else {
-            t_string!(i18n, decrease).to_string()
+            class.push_str(" mode-toggle__option--active");
         }
-    });
+        class
+    };
+    // Уменьшение недоступно (нет подходящих клеток): половина «Уменьшить»
+    // блокируется реактивно, как раньше блокировался чекбокс.
+    let decrease_disabled = move || !session.state.with(LocalGame::can_decrease);
+    // Проверка в обработчике — страховка от смены состояния can_decrease
+    // между отрисовкой кнопки и кликом.
+    let on_decrease = move |_| {
+        if session.state.with_untracked(LocalGame::can_decrease) {
+            session.mode.set(MoveMode::Decrease);
+        }
+    };
+    let on_increase = move |_| session.mode.set(MoveMode::Increase);
 
     // A start cell is claimed with Increase by default; while one is being
     // picked the mode checkbox stays hidden, so snap the mode back here.
@@ -415,37 +438,36 @@ pub fn GamePage() -> impl IntoView {
                                 let pos = BoardCode::from_slot(slot);
                                 let mode = session.mode;
 
-                                let class =
-                                    move || session.state.with(|game| cell_class(game, pos));
-                                let style =
-                                    move || session.state.with(|game| cell_style(game, pos));
-                                let value =
-                                    move || session.state.with(|game| cell_value(game, pos));
+                                // Легальные клетки и оттенки команд берутся из
+                                // мемо: один расчёт на состояние вместо расчёта
+                                // в каждой клетке доски.
+                                let class = move || {
+                                    let legal = legal_targets.get();
+                                    board_view.with(|view| cell_class(view, pos, legal))
+                                };
+                                let style = move || {
+                                    let hues = team_hues.get();
+                                    board_view.with(|view| cell_style(view, pos, &hues))
+                                };
+                                let value = move || board_view.with(|view| cell_value(view, pos));
                                 let disabled = move || {
                                     let selected = mode.get();
-                                    session.state.with(|game| {
-                                        // Клетки заблокированы, пока идёт анимация взрывов.
-                                        if game.is_animating() {
-                                            return true;
-                                        }
-                                        // A starting Decrease just claims an empty
-                                        // cell, so the usual checks do not apply.
-                                        if selected == MoveMode::Decrease
-                                            && game.is_choosing_start_cell()
-                                        {
-                                            return !game.can_move_to(pos);
-                                        }
-                                        let empty_decrease = selected == MoveMode::Decrease
-                                            && game
-                                                .game
-                                                .board()
-                                                .get(pos)
-                                                .is_some_and(|cell| cell.value <= 0);
-                                        !game.can_move_to(pos)
-                                            || empty_decrease
-                                            || (selected == MoveMode::Decrease
-                                                && !game.can_decrease())
-                                    })
+                                    let legal = legal_targets.get();
+                                    // Клетки заблокированы, пока идёт анимация взрывов.
+                                    if animating.get() {
+                                        return true;
+                                    }
+                                    // A starting Decrease just claims an empty
+                                    // cell, so the usual checks do not apply.
+                                    if selected == MoveMode::Decrease && choosing_start.get() {
+                                        return !legal.contains(pos.slot());
+                                    }
+                                    let empty_decrease = selected == MoveMode::Decrease
+                                        && board_view
+                                            .with(|view| view.cell(pos).is_some_and(|cell| cell.value <= 0));
+                                    !legal.contains(pos.slot())
+                                        || empty_decrease
+                                        || (selected == MoveMode::Decrease && !can_decrease.get())
                                 };
                                 let on_click = move |_| {
                                     let selected = mode.get_untracked();
@@ -496,8 +518,7 @@ pub fn GamePage() -> impl IntoView {
 
                     <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
                         <div class=banner_class>
-                            <span class=turn_dot_class style=turn_dot_style></span>
-                            <span class="turn-banner__text">{turn_text}</span>
+                            <span class=turn_text_class style=turn_text_style>{turn_text}</span>
                             <div class="turn-banner__side">
                                 <Show
                                     when=move || {
@@ -509,12 +530,41 @@ pub fn GamePage() -> impl IntoView {
                                     }
                                 >
                                     <div class="mode-toggle" role="group">
-                                        <ModeCheckbox
-                                            checked=mode_checked
-                                            set_checked=set_mode
-                                            label=mode_label
-                                            disabled=mode_disabled
-                                        />
+                                        <button
+                                            type="button"
+                                            class=decrease_class
+                                            aria-pressed=move || {
+                                                (session.mode.get() == MoveMode::Decrease)
+                                                    .to_string()
+                                            }
+                                            aria-label=decrease_label
+                                            title=decrease_label
+                                            disabled=decrease_disabled
+                                            on:click=on_decrease
+                                        >
+                                            <span
+                                                class="mode-toggle__dot mode-toggle__dot--decrease"
+                                                aria-hidden="true"
+                                            ></span>
+                                            <span class="mode-toggle__text">{decrease_label}</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class=increase_class
+                                            aria-pressed=move || {
+                                                (session.mode.get() == MoveMode::Increase)
+                                                    .to_string()
+                                            }
+                                            aria-label=increase_label
+                                            title=increase_label
+                                            on:click=on_increase
+                                        >
+                                            <span
+                                                class="mode-toggle__dot mode-toggle__dot--increase"
+                                                aria-hidden="true"
+                                            ></span>
+                                            <span class="mode-toggle__text">{increase_label}</span>
+                                        </button>
                                     </div>
                                 </Show>
                             </div>

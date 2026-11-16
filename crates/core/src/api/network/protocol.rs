@@ -6,10 +6,13 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::game::board::{BoardCode, CharacterId, MemberId, TeamId};
+use crate::api::{
+    auth::PlayerId,
+    game::{BoardCode, CharacterId, MemberId, TeamId},
+    network::RoomId,
+};
 
 use super::room::Room;
-use super::{RoomId, Uuid};
 
 /// Комната в списке открытых комнат главного меню.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,13 +49,11 @@ pub enum ReplayStep {
     Surrender { member: CharacterId },
 }
 
-/// Место лобби при переносе партии в онлайн: бот с номером или локальный
+/// Место лобби при переносе партии в онлайн: бот или локальный
 /// игрок на своей команде.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LobbySeat {
     pub bot: bool,
-    /// Номер бота; для игроков не используется.
-    pub label: u8,
     pub team: u8,
 }
 
@@ -158,7 +159,7 @@ pub struct RadiusRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RoomStateResponse {
     pub id: RoomId,
-    pub me: Uuid,
+    pub me: PlayerId,
     pub room: Room,
-    pub names: HashMap<Uuid, String>,
+    pub names: HashMap<PlayerId, String>,
 }

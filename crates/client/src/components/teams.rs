@@ -1,9 +1,11 @@
-use forup_core::api::game::board::prelude::{MemberId, TeamId};
-use forup_core::api::network::Uuid;
+use forup_core::api::{
+    auth::PlayerId,
+    game::prelude::{MemberId, TeamId},
+};
 use leptos::prelude::*;
 use thaw::{Button, ButtonAppearance, ButtonSize, Card, CardHeader, Select, SelectSize};
 
-use crate::game::{Controller, GamePhase, GameSession, TeamParticipantView, TeamView};
+use crate::game::{Controller, GamePhase, GameSession, LocalGame, TeamParticipantView, TeamView};
 use crate::i18n::*;
 
 /// Обёртка write-стороны селекта: игнорирует первый программный write-back
@@ -26,6 +28,7 @@ fn skip_first_write(apply: impl Fn(String) + Send + Sync + 'static) -> SignalSet
 pub fn TeamsPanel() -> impl IntoView {
     let i18n = use_i18n();
     let session = GameSession::expect();
+    let teams = Memo::new(move |_| session.state.with(LocalGame::team_views));
 
     view! {
         <section class="teams-panel">
@@ -55,9 +58,10 @@ pub fn TeamsPanel() -> impl IntoView {
 
             <div class="team-cards">
                 {move || {
-                    session
-                        .state
-                        .with(|game| game.team_views())
+                    // Мемо: панель перестраивается только когда меняется состав
+                    // команд или счёт, а не на каждый тик ползунка настроек —
+                    // иначе сотни DOM-узлов с `Select` пересобирались бы зря.
+                    teams.get()
                         .into_iter()
                         .map(|team| view! { <TeamCard team/> })
                         .collect_view()
@@ -216,7 +220,7 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
             match value
                 .strip_prefix("player")
                 .and_then(|number| number.parse::<u32>().ok())
-                .and_then(Uuid::new)
+                .and_then(PlayerId::new)
             {
                 Some(player) => MemberId::Player(player),
                 None => return,
@@ -480,15 +484,17 @@ fn ParticipantRow(member: TeamParticipantView) -> impl IntoView {
 pub fn RoomPlayersPanel() -> impl IntoView {
     let i18n = use_i18n();
     let session = GameSession::expect();
+    // Мемо: список перестраивается только при смене состава комнаты, а не на
+    // каждое изменение партии (ходы, ползунки настроек).
+    let players = Memo::new(move |_| session.state.with(|game| game.players.clone()));
 
     view! {
         <section class="room-players">
             <h2 class="section-title">{t!(i18n, room_players)}</h2>
             <div class="room-players__list">
                 {move || {
-                    session
-                        .state
-                        .with(|game| game.players.clone())
+                    players
+                        .get()
                         .into_iter()
                         .map(|player| {
                             // Memo-хэндлы — Copy: дети с Show требуют Fn-замыкание,

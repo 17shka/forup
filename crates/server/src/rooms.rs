@@ -1,6 +1,6 @@
 //! HTTP-обработчики комнатного API: список открытых комнат, создание, вход и
 //! выход, готовность, команды и ходы. Все маршруты требуют авторизацию; тела
-//! запросов и ответов кодируются postcard'ом (см. `api::encode`/`api::decode`).
+//! запросов и ответов кодируются postcard'ом (см. `http::encode`/`http::decode`).
 //!
 //! Общий шаблон обработчика: захватить мьютекс директории, применить изменение,
 //! синхронно сохранить карту в redb (при ошибке только логируем — память
@@ -8,8 +8,10 @@
 //! блокировкой и только затем отпустить её. Обработчики не содержат `await`,
 //! поэтому guard живёт до конца функции и больше нигде не захватывается.
 
-use std::collections::{BTreeSet, HashMap};
-use std::sync::MutexGuard;
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::MutexGuard,
+};
 
 use axum::{
     Router,
@@ -19,14 +21,18 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use forup_core::api::network::{
-    BoardSizeRequest, CreateRoomRequest, DistributionRequest, ExplosionRequest, MemberRequest,
-    MoveRequest, OpenRequest, RadiusRequest, ReadyRequest, Room, RoomDirectory, RoomError, RoomId,
-    RoomMode, RoomStateResponse, RoomSummary, RoomsResponse, SeatRequest, TeamRequest,
-    TurnOrderRequest, Uuid,
+use forup_core::api::{
+    auth::PlayerId,
+    network::{
+        BoardSizeRequest, CreateRoomRequest, DistributionRequest, ExplosionRequest, MemberRequest,
+        MoveRequest, OpenRequest, RadiusRequest, ReadyRequest, Room, RoomDirectory, RoomError,
+        RoomId, RoomStateResponse, RoomSummary, RoomsResponse, SeatRequest, TeamRequest,
+        TurnOrderRequest,
+    },
 };
 
-use crate::api::{ApiState, authenticated, decode, encode};
+use crate::http::{decode, encode};
+use crate::state::{ApiState, authenticated};
 
 /// Комнатные эндпоинты, встренные в основной роутер приложения.
 pub fn router<S>(state: ApiState) -> Router<S>
@@ -67,7 +73,7 @@ async fn list_rooms(Extension(state): Extension<ApiState>, headers: HeaderMap) -
     let rooms = directory
         .rooms()
         .iter()
-        .filter(|(_, room)| matches!(room.mode(), RoomMode::Online { open: true }))
+        .filter(|(_, room)| room.is_open())
         .map(|(id, room)| RoomSummary {
             id: *id,
             members: saturating_u8(room.members().len()),
@@ -85,7 +91,7 @@ async fn create_room(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -95,7 +101,7 @@ async fn create_room(
     };
 
     let mut directory = lock_rooms(&state);
-    let id = directory.create(me, RoomMode::Online { open: request.open });
+    let id = directory.create(me, request.open);
     // Воссоздаём лобби игрока, чтобы переключение Оффлайн/Онлайн ничего
     // не перестраивало. При ошибке комната откатывается целиком.
     let applied = directory
@@ -116,7 +122,7 @@ async fn room_state(
     headers: HeaderMap,
     Path(id): Path<u32>,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -134,7 +140,7 @@ async fn join_room(
     headers: HeaderMap,
     Path(id): Path<u32>,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -162,7 +168,7 @@ async fn leave_room(
     headers: HeaderMap,
     Path(id): Path<u32>,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -189,7 +195,7 @@ async fn set_ready(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -220,7 +226,7 @@ async fn set_open(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -250,7 +256,7 @@ async fn add_bot(
     headers: HeaderMap,
     Path(id): Path<u32>,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -278,7 +284,7 @@ async fn change_team(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -309,7 +315,7 @@ async fn set_seat(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -340,7 +346,7 @@ async fn set_board_size(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -372,7 +378,7 @@ async fn set_distribution(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -403,7 +409,7 @@ async fn set_explosions(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -435,7 +441,7 @@ async fn set_radius(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -466,7 +472,7 @@ async fn kick_member(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -500,7 +506,7 @@ async fn make_move(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -536,7 +542,7 @@ async fn skip_turn(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -567,7 +573,7 @@ async fn surrender(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -598,7 +604,7 @@ async fn end_game(
     headers: HeaderMap,
     Path(id): Path<u32>,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -626,7 +632,7 @@ async fn swap_order(
     Path(id): Path<u32>,
     body: Bytes,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -658,7 +664,7 @@ async fn start_game(
     headers: HeaderMap,
     Path(id): Path<u32>,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -693,7 +699,7 @@ async fn rematch_game(
     headers: HeaderMap,
     Path(id): Path<u32>,
 ) -> Response {
-    let me = match authenticated_member(&state, &headers) {
+    let me = match authenticated(&state, &headers) {
         Ok(me) => me,
         Err(response) => return response,
     };
@@ -711,13 +717,6 @@ async fn rematch_game(
     }
     persist(&state, &directory);
     build_state(&state, id, me, &directory)
-}
-
-/// Идентичность игрока в рамках комнаты: идентификаторы аккаунтов и сетевые
-/// uuid — один и тот же тип; аккаунты начинаются с 1, поэтому коллизий с
-/// локальными uuid быть не может.
-fn authenticated_member(state: &ApiState, headers: &HeaderMap) -> Result<Uuid, Response> {
-    authenticated(state, headers)
 }
 
 fn parse_room_id(raw: u32) -> Result<RoomId, Response> {
@@ -741,7 +740,7 @@ fn persist(state: &ApiState, directory: &RoomDirectory) {
 
 /// Собирает ответ со снапшотом комнаты. Вызывается под блокировкой директории:
 /// комната клонируется, guard отпускается уже после сборки ответа.
-fn build_state(state: &ApiState, id: RoomId, me: Uuid, directory: &RoomDirectory) -> Response {
+fn build_state(state: &ApiState, id: RoomId, me: PlayerId, directory: &RoomDirectory) -> Response {
     let Some(room) = directory.get(id) else {
         return room_error(RoomError::NotFound);
     };
@@ -758,8 +757,8 @@ fn build_state(state: &ApiState, id: RoomId, me: Uuid, directory: &RoomDirectory
     )
 }
 
-/// Отображаемые имена участников по их uuid (профили живут только на сервере).
-fn member_names(state: &ApiState, room: &Room) -> HashMap<Uuid, String> {
+/// Отображаемые имена участников по их идентификаторам (профили живут только на сервере).
+fn member_names(state: &ApiState, room: &Room) -> HashMap<PlayerId, String> {
     room.members()
         .keys()
         .filter_map(|id| {
@@ -789,13 +788,9 @@ fn room_error(error: RoomError) -> Response {
         RoomError::NotOwner | RoomError::PermissionDenied => StatusCode::FORBIDDEN,
         RoomError::MembersNotReady
         | RoomError::Closed
-        | RoomError::CannotKickOwner
-        | RoomError::CannotDemoteOwner
         | RoomError::MemberNotFound
-        | RoomError::Offline
         | RoomError::Game(_) => StatusCode::CONFLICT,
         RoomError::InvalidBoardSize | RoomError::InvalidLobby => StatusCode::BAD_REQUEST,
-        RoomError::GlobalTransportUnavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     encode(status, &error)
 }

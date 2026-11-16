@@ -4,12 +4,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "ssr")]
-mod api;
+mod auth;
+#[cfg(feature = "ssr")]
+mod http;
 #[cfg(feature = "ssr")]
 mod rooms;
-
 #[cfg(feature = "ssr")]
-use api::{ApiState, router as api_router};
+mod state;
+
 #[cfg(feature = "ssr")]
 use axum::Router;
 #[cfg(feature = "ssr")]
@@ -28,6 +30,8 @@ use forup_core::api::network::{RoomDirectory, RoomStore};
 use leptos::prelude::*;
 #[cfg(feature = "ssr")]
 use leptos_axum::{LeptosRoutes, generate_route_list};
+#[cfg(feature = "ssr")]
+use state::ApiState;
 
 #[cfg(feature = "ssr")]
 #[tokio::main]
@@ -56,7 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let users_path = data_dir.join("users.redb");
     let users = UserStore::open(&users_path)?;
     let rooms = Arc::new(Mutex::new(directory));
-    let api = api_router(ApiState::new(users, rooms, store));
+    let state = ApiState::new(users, rooms, store);
+    let api = auth::router(state.clone()).merge(rooms::router(state));
 
     println!("[Server] Initialized room storage at {rooms_path:?}");
     println!("[Server] Initialized accounts at {users_path:?}");

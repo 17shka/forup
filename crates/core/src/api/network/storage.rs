@@ -125,45 +125,40 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::game::board::TeamId;
-    use crate::api::network::{RoomDirectory, RoomMode, Uuid, UuidExt};
+    use crate::api::auth::{PlayerId, generate_token};
+    use crate::api::game::TeamId;
+    use crate::api::network::RoomDirectory;
 
-    fn uid(id: u32) -> Uuid {
-        Uuid::new(id).unwrap()
+    fn uid(id: u32) -> PlayerId {
+        PlayerId::new(id).unwrap()
     }
 
     #[test]
     fn rooms_roundtrip() {
-        let path = std::env::temp_dir().join(format!("forup-rooms-{}.redb", Uuid::generate()));
+        let path = std::env::temp_dir().join(format!("forup-rooms-{}.redb", generate_token()));
         let store = RoomStore::open(&path).unwrap();
 
         let owner = uid(10);
         let guest = uid(20);
         let mut directory = RoomDirectory::default();
-        let online_id = directory.create(
-            owner,
-            RoomMode::Online {
-                // global: false,
-                open: true,
-            },
-        );
+        let online_id = directory.create(owner, true);
         directory.join(online_id, guest, TeamId::MIN).unwrap();
 
-        let offline_id = directory.create(uid(11), RoomMode::Offline);
+        let solo_id = directory.create(uid(11), true);
         {
-            let offline = directory.get_mut(offline_id).unwrap();
-            offline.add_bot(uid(11), TeamId::new(2).unwrap()).unwrap();
+            let solo = directory.get_mut(solo_id).unwrap();
+            solo.add_bot(uid(11), TeamId::new(2).unwrap()).unwrap();
             // Готовность владельца автостартует партию.
-            offline.set_ready(uid(11), true).unwrap();
+            solo.set_ready(uid(11), true).unwrap();
         }
-        assert!(directory.get(offline_id).unwrap().game().is_started());
+        assert!(directory.get(solo_id).unwrap().game().is_started());
         assert_eq!(directory.get(online_id).unwrap().members().len(), 2);
 
         store.save_rooms(directory.rooms()).unwrap();
         let mut loaded = store.load_rooms().unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get(&online_id).map(Room::members).unwrap().len(), 2);
-        assert!(loaded.get(&offline_id).unwrap().game().is_started());
+        assert!(loaded.get(&solo_id).unwrap().game().is_started());
 
         // Перезапись: удалённая комната исчезает из хранилища.
         directory.remove(online_id, owner).unwrap();
@@ -177,7 +172,7 @@ mod tests {
         for (id, room) in loaded {
             restored.insert(id, room);
         }
-        assert_eq!(restored.get(offline_id).unwrap().game().is_started(), true);
+        assert_eq!(restored.get(solo_id).unwrap().game().is_started(), true);
         assert!(restored.get(online_id).is_none());
 
         drop(store);
@@ -186,7 +181,7 @@ mod tests {
 
     #[test]
     fn load_from_a_fresh_database_returns_no_rooms() {
-        let path = std::env::temp_dir().join(format!("forup-rooms-{}.redb", Uuid::generate()));
+        let path = std::env::temp_dir().join(format!("forup-rooms-{}.redb", generate_token()));
         let store = RoomStore::open(&path).unwrap();
         assert!(store.load_rooms().unwrap().is_empty());
         drop(store);

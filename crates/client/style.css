@@ -161,39 +161,50 @@ body {
 }
 
 .turn-banner {
+    /* Баннер хода всегда виден: приклеен к верху области прокрутки и
+       растянут на всю её ширину, остальное содержимое уезжает под него.
+       Полоса без скругления: в портрете отрицательные поля (−16px = поля
+       .page) выводят её на всю ширину экрана — ширину берёт растяжение
+       flex, поэтому width: 100% больше не нужен. На узких экранах
+       переключатель режима переносится на вторую строку. */
+    position: sticky;
+    top: 0;
+    z-index: 10;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    gap: 6px 10px;
     min-height: 44px;
-    padding: 8px 14px;
-    border-radius: 12px;
+    margin-inline: -16px;
+    padding: 8px 16px;
     background: var(--colorNeutralBackground1);
     box-shadow: var(--shadow4, 0 1px 2px rgba(0, 0, 0, 0.08));
+    border-bottom: 1px solid var(--colorNeutralStroke2);
     font-weight: 600;
 }
 
-.turn-banner__dot {
-    flex-shrink: 0;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: hsl(var(--team-hue, 210) 68% 46%);
-}
-
-.turn-banner__dot--idle {
-    background: var(--colorNeutralForeground3);
-}
-
+/* Цвет команды текущего игрока: сам текст хода и есть индикатор команды,
+   без отдельной точки. */
 .turn-banner__text {
+    flex: 0 1 auto;
+    min-width: 0;
     font-size: 15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.turn-banner__text--team {
+    color: hsl(var(--team-hue, 210) 68% 46%);
 }
 
 /* Правый край баннера: переключатель режима прижат к правой стороне,
-   напротив текста хода. */
+   напротив текста хода; не сжимается — на узком экране переносится. */
 .turn-banner__side {
     display: flex;
     align-items: center;
     margin-left: auto;
+    flex-shrink: 0;
 }
 
 .visually-hidden {
@@ -402,67 +413,98 @@ body {
     background: hsl(var(--team-hue, 210) 68% 46%);
 }
 
+/* Уменьшить/Увеличить — сегментированный переключатель режима хода,
+   собран по образцу Lossy/Lossless из настроек партии. */
+
 .mode-toggle {
+    --mode-decrease: #ef4444;
+    --mode-increase: #22c55e;
     display: inline-flex;
-    align-self: center;
-    gap: 4px;
+    align-items: center;
+    gap: 2px;
     padding: 3px;
     border-radius: 999px;
-    background: var(--colorNeutralBackground1);
-    box-shadow: var(--shadow4, 0 1px 2px rgba(0, 0, 0, 0.08));
+    background: var(--colorNeutralBackground3);
+    box-shadow:
+        inset 0 0 0 1px var(--colorNeutralStroke2),
+        inset 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
-.mode-checkbox {
+.mode-toggle__option {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
+    gap: 4px;
     min-height: 32px;
+    padding: 3px 12px;
     border: 0;
     border-radius: 999px;
-    background: var(--colorNeutralBackground3);
-    color: #fff;
-    font-size: 16px;
-    font-weight: 800;
-    line-height: 1;
+    background: transparent;
+    color: var(--colorNeutralForeground2);
+    font-size: 13px;
+    font-weight: 600;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
     transition:
+        color 160ms ease,
         background-color 160ms ease,
-        transform 100ms ease,
-        opacity 160ms ease;
+        box-shadow 160ms ease,
+        transform 100ms ease;
 }
 
-.mode-checkbox:hover {
-    filter: brightness(1.08);
+.mode-toggle__option:hover {
+    color: var(--colorNeutralForeground1);
 }
 
-.mode-checkbox:active {
-    transform: scale(0.92);
+.mode-toggle__option:active {
+    transform: scale(0.95);
 }
 
-.mode-checkbox:focus-visible {
+.mode-toggle__option:focus-visible {
     outline: 2px solid var(--colorBrandStroke1, #3b82f6);
     outline-offset: 2px;
 }
 
-.mode-checkbox:disabled {
+.mode-toggle__option:disabled {
     opacity: 0.4;
     cursor: default;
+    transform: none;
 }
 
-/* Включён — зелёный "+", выключен — красный "−". */
-.mode-checkbox--on {
-    background: linear-gradient(135deg, #4ade80, #16a34a);
+.mode-toggle__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    transition:
+        background-color 160ms ease,
+        box-shadow 160ms ease;
 }
 
-.mode-checkbox--off {
+.mode-toggle__dot--decrease {
+    background: var(--mode-decrease);
+}
+
+.mode-toggle__dot--increase {
+    background: var(--mode-increase);
+}
+
+/* Уменьшить — красный, увеличить — зелёный; у активной половины точка
+   перекрашивается в белый, как у Lossy/Lossless. */
+.mode-toggle__option--decrease.mode-toggle__option--active {
+    color: #fff;
     background: linear-gradient(135deg, #f87171, #dc2626);
 }
 
-.mode-checkbox__sign {
-    display: inline-block;
-    font-size: 18px;
+.mode-toggle__option--increase.mode-toggle__option--active {
+    color: #fff;
+    background: linear-gradient(135deg, #4ade80, #16a34a);
+}
+
+.mode-toggle__option--active .mode-toggle__dot {
+    background: #fff;
+}
+
+.mode-toggle__text {
     line-height: 1;
 }
 
@@ -1357,6 +1399,12 @@ body {
     .game-column--side {
         flex: 0 0 auto;
         width: clamp(280px, 36vw, 400px);
+    }
+
+    /* В ландшафте баннер хода живёт в боковой панели и занимает всю её
+       ширину: full-bleed-поля портрета не нужны. */
+    .turn-banner {
+        margin-inline: 0;
     }
 
     /* Прокручивается только верхняя часть панели с игроками, ходом,

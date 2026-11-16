@@ -1,200 +1,47 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU8;
 
-use crate::api::game::board::{
-    BoardCode, BotConfig, CharacterId, ExplosionMode, Game, GameError, MemberId, TeamId,
+use crate::api::{
+    auth::PlayerId,
+    game::{BoardCode, BotConfig, CharacterId, ExplosionMode, Game, GameError, MemberId, TeamId},
 };
 use serde::{Deserialize, Serialize};
 
-use super::Uuid;
 use super::protocol::{LobbySetup, ReplayStep};
 
-pub type RoomId = Uuid;
+pub type RoomId = PlayerId;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum Rights {
-    #[default]
-    Nope,
-    Own,
-    All,
-}
-
-impl Rights {
-    /// Whether this right allows acting on a character, given that it belongs
-    /// to the acting player.
-    pub fn allows(self, is_own: bool) -> bool {
-        match self {
-            Rights::Nope => false,
-            Rights::Own => is_own,
-            Rights::All => true,
-        }
-    }
-}
-
-/// Per-member overrides. An unset field inherits the room-wide [`GameRights`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct PlayerRights {
-    teams: Option<Rights>,
-    // добавлять/удалять/изменять владельца
-    characters: Option<bool>,
-    game_rule: Option<bool>,
-}
-
-impl PlayerRights {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_teams(mut self, teams: Rights) -> Self {
-        self.teams = Some(teams);
-        self
-    }
-
-    pub fn with_characters(mut self, allowed: bool) -> Self {
-        self.characters = Some(allowed);
-        self
-    }
-
-    pub fn with_game_rule(mut self, allowed: bool) -> Self {
-        self.game_rule = Some(allowed);
-        self
-    }
-
-    pub fn teams(&self) -> Option<Rights> {
-        self.teams
-    }
-
-    pub fn characters(&self) -> Option<bool> {
-        self.characters
-    }
-
-    pub fn game_rule(&self) -> Option<bool> {
-        self.game_rule
-    }
-}
-
-/// Room-wide game rights. Members may override them individually through
-/// [`PlayerRights`], while administrators ([`MemberRights::All`]) always have
-/// every right.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct GameRights {
-    teams: Rights,
-    characters: bool,
-    game_rule: bool,
-}
-
-impl Default for GameRights {
-    fn default() -> Self {
-        // By default everyone may move their own characters, while the roster
-        // and the rules stay in the administrator's hands.
-        Self {
-            teams: Rights::Own,
-            characters: false,
-            game_rule: false,
-        }
-    }
-}
-
-impl GameRights {
-    pub fn new(teams: Rights, characters: bool, game_rule: bool) -> Self {
-        Self {
-            teams,
-            characters,
-            game_rule,
-        }
-    }
-
-    pub fn teams(&self) -> Rights {
-        self.teams
-    }
-
-    pub fn characters(&self) -> bool {
-        self.characters
-    }
-
-    pub fn game_rule(&self) -> bool {
-        self.game_rule
-    }
-
-    pub fn with_teams(mut self, teams: Rights) -> Self {
-        self.teams = teams;
-        self
-    }
-
-    pub fn with_characters(mut self, characters: bool) -> Self {
-        self.characters = characters;
-        self
-    }
-
-    pub fn with_game_rule(mut self, game_rule: bool) -> Self {
-        self.game_rule = game_rule;
-        self
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum MemberRights {
-    /// Administrator: every right, regardless of the room policy.
-    All,
-    /// Regular member: inherits the room policy and may override it.
-    Custom(PlayerRights),
-}
-
-impl Default for MemberRights {
-    fn default() -> Self {
-        MemberRights::Custom(PlayerRights::default())
-    }
-}
-
-impl MemberRights {
-    pub fn is_admin(self) -> bool {
-        matches!(self, MemberRights::All)
-    }
-
-    /// Resolves the member's rights against the room-wide policy.
-    pub fn resolve(self, game: &GameRights) -> GameRights {
-        match self {
-            MemberRights::All => GameRights::new(Rights::All, true, true),
-            MemberRights::Custom(player) => GameRights {
-                teams: player.teams.unwrap_or(game.teams),
-                characters: player.characters.unwrap_or(game.characters),
-                game_rule: player.game_rule.unwrap_or(game.game_rule),
-            },
-        }
-    }
-}
-
+/// Участник комнаты: готовность и роль. Администратор управляет составом
+/// мест и правилами партии, обычный игрок — только собственной командой.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MemberData {
     status: Status,
-    rights: MemberRights,
+    admin: bool,
 }
 
 impl MemberData {
-    pub fn new(status: Status, rights: MemberRights) -> Self {
-        Self { status, rights }
-    }
-
-    /// The room creator and any promoted administrator.
+    /// Создатель комнаты и любой повышенный администратор.
     pub fn admin(status: Status) -> Self {
-        Self::new(status, MemberRights::All)
+        Self {
+            status,
+            admin: true,
+        }
     }
 
-    /// A regular member that inherits the room-wide policy.
+    /// Обычный участник комнаты.
     pub fn player(status: Status) -> Self {
-        Self::new(status, MemberRights::Custom(PlayerRights::default()))
+        Self {
+            status,
+            admin: false,
+        }
     }
 
     pub fn status(&self) -> Status {
         self.status
     }
 
-    pub fn rights(&self) -> MemberRights {
-        self.rights
-    }
-
     pub fn is_admin(&self) -> bool {
-        self.rights.is_admin()
+        self.admin
     }
 }
 
@@ -206,33 +53,17 @@ pub enum Status {
     Ready,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RoomMode {
-    Offline,
-    Online {
-        // global: bool, //lan/wan
-        open: bool,
-        // password
-        // max_members
-        // ...
-    },
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoomError {
     NotFound,
     NotOwner,
     PermissionDenied,
     MembersNotReady,
-    CannotKickOwner,
-    CannotDemoteOwner,
     MemberNotFound,
     InvalidBoardSize,
     /// Лобби-снимок не годится: неверный размер доски или команда места.
     InvalidLobby,
     Closed,
-    Offline,
-    GlobalTransportUnavailable,
     Game(GameError),
 }
 
@@ -242,15 +73,14 @@ impl From<GameError> for RoomError {
     }
 }
 
-/// Комната целиком: режим, участники, права и партия. Сервер хранит комнаты
+/// Комната целиком: участники и партия. Сервер хранит комнаты
 /// в `BTreeMap<RoomId, Room>` и сохраняет карту в базу; идентичность комнаты —
 /// её ключ в этой карте, поэтому отдельного поля идентификатора нет.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Room {
-    mode: RoomMode,
-    members: HashMap<Uuid, MemberData>,
-    /// Room-wide policy used by members without an override.
-    rights: GameRights,
+    /// Открыта ли комната для входа новых участников.
+    open: bool,
+    members: HashMap<PlayerId, MemberData>,
     bots: HashMap<CharacterId, BotConfig>,
     game: Game,
     automatic_distribution: bool,
@@ -260,29 +90,26 @@ pub struct Room {
     /// Шаги последнего действия (старт или ход с ответами ботов): по ним
     /// клиент повторяет чужие ходы с анимацией волна за волной.
     last_steps: Vec<ReplayStep>,
-    /// Отображаемые номера ботов («Бот 1», «Бот 2», ...).
-    bot_labels: HashMap<CharacterId, u8>,
 }
 
 impl Room {
-    pub fn new(owner: Uuid, mode: RoomMode) -> Self {
+    pub fn new(owner: PlayerId, open: bool) -> Self {
         let mut game = Game::standard();
         game.join(owner, TeamId::MIN)
             .expect("a new room must have space for its owner");
         Self {
-            mode,
+            open,
             members: HashMap::from([(owner, MemberData::admin(Status::NotReady))]),
-            rights: GameRights::default(),
             bots: HashMap::new(),
             game,
             automatic_distribution: true,
             seq: 0,
             last_steps: Vec::new(),
-            bot_labels: HashMap::new(),
         }
     }
 
-    pub fn owner(&self) -> Option<Uuid> {
+    /// Идентификатор администратора с наименьшим номером, если он есть.
+    pub fn owner(&self) -> Option<PlayerId> {
         self.members
             .iter()
             .filter(|(_, data)| data.is_admin())
@@ -290,35 +117,20 @@ impl Room {
             .min()
     }
 
-    pub fn mode(&self) -> RoomMode {
-        self.mode
+    /// Открыта ли комната для входа новых участников.
+    pub fn is_open(&self) -> bool {
+        self.open
     }
 
-    pub fn members(&self) -> &HashMap<Uuid, MemberData> {
+    pub fn members(&self) -> &HashMap<PlayerId, MemberData> {
         &self.members
     }
 
-    pub fn member(&self, id: Uuid) -> Option<&MemberData> {
+    pub fn member(&self, id: PlayerId) -> Option<&MemberData> {
         self.members.get(&id)
     }
 
-    pub fn member_rights(&self, id: Uuid) -> Option<MemberRights> {
-        self.members.get(&id).map(MemberData::rights)
-    }
-
-    /// The room-wide policy shared by members without an override.
-    pub fn rights(&self) -> GameRights {
-        self.rights
-    }
-
-    /// Rights a member actually has after applying their personal overrides.
-    pub fn effective_rights(&self, id: Uuid) -> Option<GameRights> {
-        self.members
-            .get(&id)
-            .map(|member| member.rights.resolve(&self.rights))
-    }
-
-    pub fn is_admin(&self, id: Uuid) -> bool {
+    pub fn is_admin(&self, id: PlayerId) -> bool {
         self.members.get(&id).is_some_and(MemberData::is_admin)
     }
 
@@ -331,14 +143,9 @@ impl Room {
         self.seq
     }
 
-    /// Шаги последнего действиядля серверного «реплея» на клиенте.
+    /// Шаги последнего действия для серверного «реплея» на клиенте.
     pub fn last_steps(&self) -> &[ReplayStep] {
         &self.last_steps
-    }
-
-    /// Отображаемые номера ботов по идентификаторам персонажей.
-    pub fn bot_labels(&self) -> &HashMap<CharacterId, u8> {
-        &self.bot_labels
     }
 
     pub fn game(&self) -> &Game {
@@ -366,8 +173,8 @@ impl Room {
 
     /// Adds an extra hot-seat seat controlled by the owner. Local seats are not
     /// room members: they never gate `start` on readiness.
-    pub fn add_local_member(&mut self, actor: Uuid) -> Result<CharacterId, RoomError> {
-        self.ensure_characters(actor)?;
+    pub fn add_local_member(&mut self, actor: PlayerId) -> Result<CharacterId, RoomError> {
+        self.ensure_admin(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -378,15 +185,14 @@ impl Room {
     }
 
     /// Переназначает контроллера места: любой игрок комнаты или бот.
-    /// Требует права на изменение участников (по умолчанию — только
-    /// администратор) и разрешено только до старта партии.
+    /// Требует прав администратора и разрешено только до старта партии.
     pub fn set_member_controller(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         member_id: CharacterId,
         controller: MemberId,
     ) -> Result<(), RoomError> {
-        self.ensure_characters(actor)?;
+        self.ensure_admin(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -403,22 +209,22 @@ impl Room {
         match controller {
             MemberId::Bot => {
                 self.bots.insert(member_id, BotConfig::STANDARD);
-                if !self.bot_labels.contains_key(&member_id) {
-                    let label = self.lowest_free_bot_label();
-                    self.bot_labels.insert(member_id, label);
-                }
             }
             MemberId::Player(_) => {
                 self.bots.remove(&member_id);
-                self.bot_labels.remove(&member_id);
             }
         }
         self.lobby_changed();
         Ok(())
     }
 
-    pub fn set_board_size(&mut self, actor: Uuid, width: u8, height: u8) -> Result<(), RoomError> {
-        self.ensure_game_rule(actor)?;
+    pub fn set_board_size(
+        &mut self,
+        actor: PlayerId,
+        width: u8,
+        height: u8,
+    ) -> Result<(), RoomError> {
+        self.ensure_admin(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -433,10 +239,10 @@ impl Room {
 
     pub fn set_automatic_distribution(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         automatic: bool,
     ) -> Result<(), RoomError> {
-        self.ensure_game_rule(actor)?;
+        self.ensure_admin(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -447,10 +253,10 @@ impl Room {
 
     pub fn set_lossless_explosions(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         lossless: bool,
     ) -> Result<(), RoomError> {
-        self.ensure_game_rule(actor)?;
+        self.ensure_admin(actor)?;
         let mode = if lossless {
             ExplosionMode::Lossless
         } else {
@@ -463,47 +269,17 @@ impl Room {
 
     /// Sets the squared safe radius for start cells. The value is clamped to
     /// [`Game::max_safe_radius`]; the stored value is returned.
-    pub fn set_safe_radius(&mut self, actor: Uuid, radius_sq: u8) -> Result<u8, RoomError> {
-        self.ensure_game_rule(actor)?;
+    pub fn set_safe_radius(&mut self, actor: PlayerId, radius_sq: u8) -> Result<u8, RoomError> {
+        self.ensure_admin(actor)?;
         let clamped = self.game.set_safe_radius(radius_sq)?;
         self.touch();
         Ok(clamped)
     }
 
-    /// Replaces the room-wide policy. Only administrators may do this.
-    pub fn set_game_rights(&mut self, actor: Uuid, rights: GameRights) -> Result<(), RoomError> {
-        self.ensure_owner(actor)?;
-        self.rights = rights;
-        self.touch();
-        Ok(())
-    }
-
-    /// Overrides a single member's rights. Only administrators may do this and
-    /// the last administrator cannot demote themselves.
-    pub fn set_member_rights(
-        &mut self,
-        actor: Uuid,
-        target: Uuid,
-        rights: MemberRights,
-    ) -> Result<(), RoomError> {
-        self.ensure_owner(actor)?;
-        let target_is_admin = self.members.get(&target).is_some_and(MemberData::is_admin);
-        if target_is_admin && !rights.is_admin() && self.admin_count() <= 1 {
-            return Err(RoomError::CannotDemoteOwner);
-        }
-        let member = self
-            .members
-            .get_mut(&target)
-            .ok_or(RoomError::MemberNotFound)?;
-        member.rights = rights;
-        self.touch();
-        Ok(())
-    }
-
     /// Сбрасывает завершённую партию: чистит доску и статистику, возвращает
     /// участников в лобби не готовыми. Состав мест, команды и настройки
     /// комнаты не меняются. Запросить может любой участник комнаты.
-    pub fn rematch(&mut self, actor: Uuid) -> Result<(), RoomError> {
+    pub fn rematch(&mut self, actor: PlayerId) -> Result<(), RoomError> {
         if !self.members.contains_key(&actor) {
             return Err(RoomError::PermissionDenied);
         }
@@ -558,43 +334,32 @@ impl Room {
         Ok(())
     }
 
-    pub fn set_open(&mut self, actor: Uuid, open: bool) -> Result<(), RoomError> {
+    pub fn set_open(&mut self, actor: PlayerId, open: bool) -> Result<(), RoomError> {
         self.ensure_owner(actor)?;
-        match &mut self.mode {
-            RoomMode::Offline => Err(RoomError::Offline),
-            RoomMode::Online { open: current, .. } => {
-                *current = open;
-                self.touch();
-                Ok(())
-            }
-        }
+        self.open = open;
+        self.touch();
+        Ok(())
     }
 
-    pub fn join(&mut self, player: Uuid, team_id: TeamId) -> Result<(), RoomError> {
-        match self.mode {
-            RoomMode::Offline => return Err(RoomError::Offline),
-            // RoomMode::Online { global: true, .. } => {
-            //     return Err(RoomError::GlobalTransportUnavailable);
-            // }
-            RoomMode::Online { open: false, .. } => return Err(RoomError::Closed),
-            RoomMode::Online { open: true } => {}
+    pub fn join(&mut self, player: PlayerId, team_id: TeamId) -> Result<(), RoomError> {
+        if !self.open {
+            return Err(RoomError::Closed);
         }
         if !self.members.contains_key(&player) {
             self.game.join(player, team_id)?;
             // The first member of an unowned room takes over as administrator.
-            let rights = if self.members.values().any(MemberData::is_admin) {
-                MemberRights::Custom(PlayerRights::default())
+            let data = if self.members.values().any(MemberData::is_admin) {
+                MemberData::player(Status::NotReady)
             } else {
-                MemberRights::All
+                MemberData::admin(Status::NotReady)
             };
-            self.members
-                .insert(player, MemberData::new(Status::NotReady, rights));
+            self.members.insert(player, data);
             self.touch();
         }
         Ok(())
     }
 
-    pub fn leave(&mut self, player: Uuid) -> Result<(), RoomError> {
+    pub fn leave(&mut self, player: PlayerId) -> Result<(), RoomError> {
         let controller = MemberId::Player(player);
         let characters: Vec<_> = self
             .game
@@ -614,7 +379,7 @@ impl Room {
         Ok(())
     }
 
-    pub fn set_ready(&mut self, actor: Uuid, ready: bool) -> Result<(), RoomError> {
+    pub fn set_ready(&mut self, actor: PlayerId, ready: bool) -> Result<(), RoomError> {
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
         }
@@ -633,7 +398,7 @@ impl Room {
 
     pub fn change_team(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         target_member: CharacterId,
         new_team: TeamId,
     ) -> Result<(), RoomError> {
@@ -646,10 +411,8 @@ impl Room {
             .characters()
             .get(&target_member)
             .is_some_and(|character| character.controller == MemberId::Player(actor));
-        let may_change = self
-            .effective_rights(actor)
-            .is_some_and(|rights| rights.teams.allows(is_own));
-        if !may_change {
+        // Администратор переносит любое место, обычный игрок — только своё.
+        if !(self.is_admin(actor) || is_own) {
             return Err(RoomError::PermissionDenied);
         }
 
@@ -658,38 +421,32 @@ impl Room {
         Ok(())
     }
 
-    pub fn add_bot(&mut self, actor: Uuid, team_id: TeamId) -> Result<CharacterId, RoomError> {
+    pub fn add_bot(&mut self, actor: PlayerId, team_id: TeamId) -> Result<CharacterId, RoomError> {
         self.add_bot_with_config(actor, team_id, BotConfig::STANDARD)
     }
 
     pub fn add_bot_with_config(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         team_id: TeamId,
         config: BotConfig,
     ) -> Result<CharacterId, RoomError> {
-        self.ensure_characters(actor)?;
+        self.ensure_admin(actor)?;
         let bot_id = self.game.add_bot(team_id)?;
-        let label = self.lowest_free_bot_label();
         self.bots.insert(bot_id, config);
-        self.bot_labels.insert(bot_id, label);
         self.lobby_changed();
         Ok(bot_id)
-    }
-
-    /// Наименьший свободный отображаемый номер бота.
-    fn lowest_free_bot_label(&self) -> u8 {
-        let used: BTreeSet<u8> = self.bot_labels.values().copied().collect();
-        (1..=u8::MAX)
-            .find(|label| !used.contains(label))
-            .unwrap_or(u8::MAX)
     }
 
     /// Удаляет место. Удаляемо любое место — бот, игрок и даже собственное
     /// место администратора. При этом игрок-контролёр остаётся членом
     /// комнаты (оператором без места): выйти из комнаты может только сам.
-    pub fn kick_member(&mut self, actor: Uuid, member_id: CharacterId) -> Result<(), RoomError> {
-        self.ensure_characters(actor)?;
+    pub fn kick_member(
+        &mut self,
+        actor: PlayerId,
+        member_id: CharacterId,
+    ) -> Result<(), RoomError> {
+        self.ensure_admin(actor)?;
         let controller = self
             .game
             .characters()
@@ -697,7 +454,6 @@ impl Room {
             .ok_or(GameError::CharacterNotFound)?
             .controller;
         self.game.kick_member(member_id)?;
-        self.bot_labels.remove(&member_id);
         if controller == MemberId::Bot {
             self.bots.remove(&member_id);
         }
@@ -719,15 +475,8 @@ impl Room {
             return;
         };
         if let Some(member) = self.members.get_mut(&id) {
-            member.rights = MemberRights::All;
+            member.admin = true;
         }
-    }
-
-    fn admin_count(&self) -> usize {
-        self.members
-            .values()
-            .filter(|member| member.is_admin())
-            .count()
     }
 
     /// Уплотняет номера команд до 1..K. Только до старта: после старта
@@ -765,7 +514,11 @@ impl Room {
         }
     }
 
-    pub fn start(&mut self, actor: Uuid, automatic_distribution: bool) -> Result<(), RoomError> {
+    pub fn start(
+        &mut self,
+        actor: PlayerId,
+        automatic_distribution: bool,
+    ) -> Result<(), RoomError> {
         self.ensure_owner(actor)?;
         self.start_unchecked(automatic_distribution)
     }
@@ -778,7 +531,7 @@ impl Room {
         // Only members who actually control a seat gate the start; an operator
         // without seats (e.g. after kicking everyone in a hot-seat room) does
         // not block the game from reporting the real problem.
-        let seated: BTreeSet<Uuid> = self
+        let seated: BTreeSet<PlayerId> = self
             .game
             .characters()
             .values()
@@ -813,7 +566,7 @@ impl Room {
 
     /// Принудительное завершение партии администратором. Победитель
     /// определяется по текущей расстановке (клиенты увидят его в статистике).
-    pub fn end_game(&mut self, actor: Uuid) -> Result<(), RoomError> {
+    pub fn end_game(&mut self, actor: PlayerId) -> Result<(), RoomError> {
         self.ensure_owner(actor)?;
         self.game.end_game()?;
         self.touch();
@@ -821,15 +574,14 @@ impl Room {
     }
 
     /// Меняет местами позиции двух участников в последовательности ходов.
-    /// Требует права на изменение правил (по умолчанию — только администратор)
-    /// и разрешено только до старта партии.
+    /// Требует прав администратора и разрешено только до старта партии.
     pub fn swap_turn_order(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         a: CharacterId,
         b: CharacterId,
     ) -> Result<(), RoomError> {
-        self.ensure_game_rule(actor)?;
+        self.ensure_admin(actor)?;
         self.game.swap_turn_order(a, b)?;
         self.lobby_changed();
         Ok(())
@@ -842,7 +594,7 @@ impl Room {
     /// повторили чужие ходы с анимацией волна за волной.
     fn player_action(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         member_id: CharacterId,
         apply: impl FnOnce(
             &mut Game,
@@ -872,7 +624,7 @@ impl Room {
 
     pub fn increase(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         member_id: CharacterId,
         pos: BoardCode,
     ) -> Result<Option<TeamId>, RoomError> {
@@ -889,7 +641,7 @@ impl Room {
 
     pub fn decrease(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         member_id: CharacterId,
         pos: BoardCode,
     ) -> Result<Option<TeamId>, RoomError> {
@@ -906,7 +658,7 @@ impl Room {
 
     pub fn skip(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         member_id: CharacterId,
     ) -> Result<Option<TeamId>, RoomError> {
         self.player_action(actor, member_id, |game, member, steps| {
@@ -917,7 +669,7 @@ impl Room {
 
     pub fn surrender(
         &mut self,
-        actor: Uuid,
+        actor: PlayerId,
         member_id: CharacterId,
     ) -> Result<Option<TeamId>, RoomError> {
         self.player_action(actor, member_id, |game, member, steps| {
@@ -929,7 +681,11 @@ impl Room {
     /// Воссоздаёт на сервере лобби игрока при переключении Оффлайн/Онлайн:
     /// размер доски, правила и места (боты с номерами, локальные игроки на
     /// своих командах). Вызывается только на свежесозданной комнате.
-    pub fn apply_lobby_setup(&mut self, actor: Uuid, setup: &LobbySetup) -> Result<(), RoomError> {
+    pub fn apply_lobby_setup(
+        &mut self,
+        actor: PlayerId,
+        setup: &LobbySetup,
+    ) -> Result<(), RoomError> {
         self.ensure_owner(actor)?;
         if self.game.is_started() {
             return Err(GameError::GameAlreadyStarted.into());
@@ -965,16 +721,7 @@ impl Room {
         for seat in &setup.seats {
             let team = TeamId::new(seat.team).ok_or(RoomError::InvalidLobby)?;
             if seat.bot {
-                let bot_id = self.add_bot_with_config(actor, team, BotConfig::STANDARD)?;
-                // Сохраняем запрошенный номер, если он ещё свободен.
-                let requested_free = seat.label > 0
-                    && !self
-                        .bot_labels
-                        .iter()
-                        .any(|(&id, &label)| id != bot_id && label == seat.label);
-                if requested_free {
-                    self.bot_labels.insert(bot_id, seat.label);
-                }
+                self.add_bot_with_config(actor, team, BotConfig::STANDARD)?;
             } else {
                 // Hot-seat место под контролем создателя комнаты.
                 self.game.add_local_member(actor, team)?;
@@ -1016,7 +763,7 @@ impl Room {
     }
 
     /// Requires the actor to be an administrator (full rights).
-    fn ensure_owner(&self, actor: Uuid) -> Result<(), RoomError> {
+    fn ensure_owner(&self, actor: PlayerId) -> Result<(), RoomError> {
         if self.is_admin(actor) {
             Ok(())
         } else {
@@ -1024,21 +771,10 @@ impl Room {
         }
     }
 
-    fn resolved_rights(&self, actor: Uuid) -> Result<GameRights, RoomError> {
-        self.effective_rights(actor)
-            .ok_or(RoomError::PermissionDenied)
-    }
-
-    fn ensure_game_rule(&self, actor: Uuid) -> Result<(), RoomError> {
-        if self.resolved_rights(actor)?.game_rule {
-            Ok(())
-        } else {
-            Err(RoomError::PermissionDenied)
-        }
-    }
-
-    fn ensure_characters(&self, actor: Uuid) -> Result<(), RoomError> {
-        if self.resolved_rights(actor)?.characters {
+    /// Требует от вызывающего прав администратора: состав мест и правила
+    /// партии — прерогатива администратора комнаты.
+    fn ensure_admin(&self, actor: PlayerId) -> Result<(), RoomError> {
+        if self.is_admin(actor) {
             Ok(())
         } else {
             Err(RoomError::PermissionDenied)
@@ -1054,7 +790,7 @@ pub struct RoomDirectory {
 impl RoomDirectory {
     /// Выбирает следующий свободный порядковый идентификатор комнаты.
     fn next_room_id(&self) -> RoomId {
-        let taken = |id: u32| Uuid::new(id).filter(|&id| !self.rooms.contains_key(&id));
+        let taken = |id: u32| PlayerId::new(id).filter(|&id| !self.rooms.contains_key(&id));
         let next = self
             .rooms
             .last_key_value()
@@ -1064,9 +800,9 @@ impl RoomDirectory {
             .expect("room id space exhausted")
     }
 
-    pub fn create(&mut self, owner: Uuid, mode: RoomMode) -> RoomId {
+    pub fn create(&mut self, owner: PlayerId, open: bool) -> RoomId {
         let id = self.next_room_id();
-        self.rooms.insert(id, Room::new(owner, mode));
+        self.rooms.insert(id, Room::new(owner, open));
         id
     }
 
@@ -1079,10 +815,6 @@ impl RoomDirectory {
         &self.rooms
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.rooms.is_empty()
-    }
-
     pub fn get(&self, id: RoomId) -> Option<&Room> {
         self.rooms.get(&id)
     }
@@ -1091,21 +823,21 @@ impl RoomDirectory {
         self.rooms.get_mut(&id)
     }
 
-    pub fn join(&mut self, id: RoomId, player: Uuid, team_id: TeamId) -> Result<(), RoomError> {
+    pub fn join(&mut self, id: RoomId, player: PlayerId, team_id: TeamId) -> Result<(), RoomError> {
         self.rooms
             .get_mut(&id)
             .ok_or(RoomError::NotFound)?
             .join(player, team_id)
     }
 
-    pub fn leave(&mut self, id: RoomId, player: Uuid) -> Result<(), RoomError> {
+    pub fn leave(&mut self, id: RoomId, player: PlayerId) -> Result<(), RoomError> {
         self.rooms
             .get_mut(&id)
             .ok_or(RoomError::NotFound)?
             .leave(player)
     }
 
-    pub fn remove(&mut self, id: RoomId, actor: Uuid) -> Result<Room, RoomError> {
+    pub fn remove(&mut self, id: RoomId, actor: PlayerId) -> Result<Room, RoomError> {
         let room = self.rooms.get(&id).ok_or(RoomError::NotFound)?;
         room.ensure_owner(actor)?;
         Ok(self.rooms.remove(&id).expect("room checked above"))
@@ -1122,12 +854,6 @@ impl RoomDirectory {
             self.rooms.remove(&id);
         }
     }
-
-    pub fn list_open_local(&self) -> impl Iterator<Item = &Room> {
-        self.rooms
-            .values()
-            .filter(|room| matches!(room.mode, RoomMode::Online { open: true }))
-    }
 }
 
 #[cfg(test)]
@@ -1135,8 +861,8 @@ mod tests {
     use super::*;
     use crate::api::network::protocol::{LobbySeat, RoomStateResponse};
 
-    fn uid(id: u32) -> Uuid {
-        Uuid::new(id).unwrap()
+    fn uid(id: u32) -> PlayerId {
+        PlayerId::new(id).unwrap()
     }
 
     fn tid(id: u8) -> TeamId {
@@ -1148,7 +874,7 @@ mod tests {
         let owner = uid(10);
         let guest = uid(20);
         let mut directory = RoomDirectory::default();
-        let room_id = directory.create(owner, RoomMode::Online { open: true });
+        let room_id = directory.create(owner, true);
 
         directory.join(room_id, guest, tid(1)).unwrap();
         assert_eq!(directory.get(room_id).unwrap().members().len(), 2);
@@ -1178,7 +904,7 @@ mod tests {
         let owner = uid(10);
         let guest = uid(20);
         let mut directory = RoomDirectory::default();
-        let room_id = directory.create(owner, RoomMode::Online { open: true });
+        let room_id = directory.create(owner, true);
 
         directory.remove_if_empty(room_id);
         assert!(directory.get(room_id).is_some(), "owner still inside");
@@ -1197,7 +923,7 @@ mod tests {
     fn room_owns_game_management_permissions_and_member_sync() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(1)).unwrap();
         let guest_character = room
             .game()
@@ -1223,12 +949,6 @@ mod tests {
             room.skip(guest, owner_character),
             Err(RoomError::PermissionDenied)
         );
-        room.set_game_rights(owner, GameRights::new(Rights::Nope, false, false))
-            .unwrap();
-        assert_eq!(
-            room.change_team(guest, guest_character, tid(4)),
-            Err(RoomError::PermissionDenied)
-        );
         // Администратор может удалить и собственное место: он остаётся
         // в комнате оператором без места.
         room.kick_member(owner, owner_character).unwrap();
@@ -1246,150 +966,13 @@ mod tests {
         let bot_id = room.add_bot(owner, tid(2)).unwrap();
         assert_eq!(room.bots().get(&bot_id), Some(&BotConfig::STANDARD));
         assert_eq!(room.members().len(), 2);
-        assert_eq!(room.bot_labels().get(&bot_id), Some(&1));
-    }
-
-    #[test]
-    fn rights_default_to_own_team_changes_for_members() {
-        let owner = uid(10);
-        let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
-        room.join(guest, tid(1)).unwrap();
-        let owner_character = room
-            .game()
-            .characters()
-            .iter()
-            .find(|(_, character)| character.controller == MemberId::Player(owner))
-            .map(|(&id, _)| id)
-            .unwrap();
-        let guest_character = room
-            .game()
-            .characters()
-            .iter()
-            .find(|(_, character)| character.controller == MemberId::Player(guest))
-            .map(|(&id, _)| id)
-            .unwrap();
-
-        assert!(room.is_admin(owner));
-        assert!(!room.is_admin(guest));
-        assert_eq!(room.rights(), GameRights::default());
-        assert_eq!(room.effective_rights(guest), Some(GameRights::default()));
-
-        // Guests may move their own seats but not someone else's.
-        assert_eq!(room.change_team(guest, guest_character, tid(3)), Ok(()));
-        assert_eq!(
-            room.change_team(guest, owner_character, tid(3)),
-            Err(RoomError::PermissionDenied)
-        );
-
-        // The roster and the rules stay in the administrator's hands.
-        assert_eq!(
-            room.add_bot(guest, tid(2)),
-            Err(RoomError::PermissionDenied)
-        );
-        assert_eq!(
-            room.set_board_size(guest, 5, 5),
-            Err(RoomError::PermissionDenied)
-        );
-        assert_eq!(
-            room.set_game_rights(guest, GameRights::new(Rights::All, true, true)),
-            Err(RoomError::NotOwner)
-        );
-    }
-
-    #[test]
-    fn member_overrides_extend_the_room_policy() {
-        let owner = uid(10);
-        let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
-        room.join(guest, tid(1)).unwrap();
-        let guest_character = room
-            .game()
-            .characters()
-            .iter()
-            .find(|(_, character)| character.controller == MemberId::Player(guest))
-            .map(|(&id, _)| id)
-            .unwrap();
-
-        room.set_member_rights(
-            owner,
-            guest,
-            MemberRights::Custom(
-                PlayerRights::new()
-                    .with_teams(Rights::All)
-                    .with_characters(true)
-                    .with_game_rule(true),
-            ),
-        )
-        .unwrap();
-
-        assert_eq!(
-            room.effective_rights(guest),
-            Some(GameRights::new(Rights::All, true, true))
-        );
-        assert_eq!(room.change_team(guest, guest_character, tid(2)), Ok(()));
-        assert!(room.add_bot(guest, tid(3)).is_ok());
-        assert_eq!(room.set_board_size(guest, 5, 5), Ok(()));
-    }
-
-    #[test]
-    fn global_rights_tighten_members_but_never_administrators() {
-        let owner = uid(10);
-        let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
-        room.join(guest, tid(1)).unwrap();
-        let guest_character = room
-            .game()
-            .characters()
-            .iter()
-            .find(|(_, character)| character.controller == MemberId::Player(guest))
-            .map(|(&id, _)| id)
-            .unwrap();
-
-        room.set_game_rights(owner, GameRights::new(Rights::Nope, true, false))
-            .unwrap();
-
-        // The policy denies team changes but grants roster management.
-        assert_eq!(
-            room.change_team(guest, guest_character, tid(2)),
-            Err(RoomError::PermissionDenied)
-        );
-        assert!(room.add_bot(guest, tid(3)).is_ok());
-        assert_eq!(
-            room.set_board_size(guest, 5, 5),
-            Err(RoomError::PermissionDenied)
-        );
-
-        // Administrators ignore the room policy.
-        assert_eq!(room.change_team(owner, guest_character, tid(2)), Ok(()));
-    }
-
-    #[test]
-    fn the_last_administrator_is_preserved() {
-        let owner = uid(10);
-        let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
-        room.join(guest, tid(1)).unwrap();
-
-        assert_eq!(
-            room.set_member_rights(owner, owner, MemberRights::Custom(PlayerRights::default())),
-            Err(RoomError::CannotDemoteOwner)
-        );
-
-        // Once there are two administrators, one of them may step down.
-        room.set_member_rights(owner, guest, MemberRights::All)
-            .unwrap();
-        assert_eq!(room.admin_count(), 2);
-        room.set_member_rights(owner, owner, MemberRights::Custom(PlayerRights::default()))
-            .unwrap();
-        assert_eq!(room.owner(), Some(guest));
     }
 
     #[test]
     fn leaving_promotes_the_next_member_to_administrator() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(1)).unwrap();
 
         room.leave(owner).unwrap();
@@ -1397,21 +980,7 @@ mod tests {
         assert!(room.is_admin(guest));
     }
 
-    #[test]
-    fn offline_room_cannot_be_joined_or_opened() {
-        let mut directory = RoomDirectory::default();
-        let room_id = directory.create(uid(10), RoomMode::Offline);
-        assert_eq!(
-            directory.join(room_id, uid(20), tid(1)),
-            Err(RoomError::Offline)
-        );
-        assert_eq!(
-            directory.get_mut(room_id).unwrap().set_open(uid(10), true),
-            Err(RoomError::Offline)
-        );
-    }
-
-    fn seat_of(room: &Room, player: Uuid) -> CharacterId {
+    fn seat_of(room: &Room, player: PlayerId) -> CharacterId {
         room.game()
             .characters()
             .iter()
@@ -1424,7 +993,7 @@ mod tests {
     fn seat_controllers_can_be_reassigned_to_members_and_bots() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         let guest_seat = seat_of(&room, guest);
 
@@ -1470,7 +1039,7 @@ mod tests {
     fn seat_controllers_cannot_be_reassigned_after_the_start() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         room.set_ready(owner, true).unwrap();
         // Последний готовый игрок стартует партию автоматически.
@@ -1487,7 +1056,7 @@ mod tests {
     fn surrender_out_of_turn_costs_the_seat_and_keeps_the_turn() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         // Третья команда — бот: после сдачи гостя партия продолжается.
         room.add_bot(owner, tid(3)).unwrap();
@@ -1517,7 +1086,7 @@ mod tests {
     fn admin_can_force_end_a_started_game() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         room.set_ready(owner, true).unwrap();
         room.set_ready(guest, true).unwrap();
@@ -1545,7 +1114,7 @@ mod tests {
     fn turn_order_swap_requires_admin_rights_before_start() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         let owner_seat = seat_of(&room, owner);
         let guest_seat = seat_of(&room, guest);
@@ -1578,7 +1147,7 @@ mod tests {
     fn turn_order_survives_the_wire_round_trip() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         let owner_seat = seat_of(&room, owner);
         let guest_seat = seat_of(&room, guest);
@@ -1604,7 +1173,7 @@ mod tests {
     fn leaving_mid_game_costs_the_seat() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         room.set_ready(owner, true).unwrap();
         room.set_ready(guest, true).unwrap();
@@ -1628,7 +1197,7 @@ mod tests {
     #[test]
     fn player_moves_are_recorded_as_replay_steps() {
         let owner = uid(10);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.add_bot(owner, tid(2)).unwrap();
         // Готовность единственного игрока автостартует партию (авторасстановка
         // в комнате включена по умолчанию).
@@ -1675,7 +1244,7 @@ mod tests {
         assert!(room.seq() > seq);
 
         // Изменение вне партии сбрасывает шаги, но повышает счётчик.
-        room.set_game_rights(owner, GameRights::default()).unwrap();
+        room.set_open(owner, false).unwrap();
         assert!(room.last_steps().is_empty());
         assert!(room.seq() > seq + 1);
     }
@@ -1683,7 +1252,7 @@ mod tests {
     #[test]
     fn lobby_setup_creates_the_same_lobby_on_the_server() {
         let me = uid(10);
-        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let mut room = Room::new(me, true);
 
         room.apply_lobby_setup(
             me,
@@ -1697,19 +1266,10 @@ mod tests {
                 seats: vec![
                     LobbySeat {
                         bot: false,
-                        label: 0,
                         team: 1,
                     },
-                    LobbySeat {
-                        bot: true,
-                        label: 5,
-                        team: 2,
-                    },
-                    LobbySeat {
-                        bot: true,
-                        label: 2,
-                        team: 3,
-                    },
+                    LobbySeat { bot: true, team: 2 },
+                    LobbySeat { bot: true, team: 3 },
                 ],
             },
         )
@@ -1746,14 +1306,12 @@ mod tests {
             .unwrap();
         assert_eq!(room.bots().get(&team2_seat), Some(&BotConfig::STANDARD));
         assert_eq!(room.bots().get(&team3_seat), Some(&BotConfig::STANDARD));
-        assert_eq!(room.bot_labels().get(&team2_seat), Some(&5));
-        assert_eq!(room.bot_labels().get(&team3_seat), Some(&2));
     }
 
     #[test]
     fn start_records_the_first_bot_turns() {
         let me = uid(10);
-        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let mut room = Room::new(me, true);
         room.apply_lobby_setup(
             me,
             &LobbySetup {
@@ -1764,16 +1322,8 @@ mod tests {
                 radius_sq: 2,
                 my_team: None,
                 seats: vec![
-                    LobbySeat {
-                        bot: true,
-                        label: 1,
-                        team: 2,
-                    },
-                    LobbySeat {
-                        bot: true,
-                        label: 2,
-                        team: 3,
-                    },
+                    LobbySeat { bot: true, team: 2 },
+                    LobbySeat { bot: true, team: 3 },
                 ],
             },
         )
@@ -1795,7 +1345,7 @@ mod tests {
     fn readying_every_member_starts_the_game_automatically() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
 
         room.set_ready(owner, true).unwrap();
@@ -1808,7 +1358,7 @@ mod tests {
         assert!(room.game().is_started());
         // Готовность сбрасывается вместе со стартом: после естественного конца
         // партии не готов ни один участник, и последующие изменения лобби
-        // (leave/kick/готовность) не перезапускают матч мгновенно.
+        // (leave/kick/готовность) не перезапускают матч мгленно.
         assert!(
             room.members()
                 .values()
@@ -1826,7 +1376,7 @@ mod tests {
     fn unseated_members_gate_the_autostart_too() {
         let owner = uid(10);
         let guest = uid(20);
-        let mut room = Room::new(owner, RoomMode::Online { open: true });
+        let mut room = Room::new(owner, true);
         room.join(guest, tid(2)).unwrap();
         // Владелец удаляет собственное место и остаётся оператором-зрителем;
         // гость и бот образуют играбельный стол.
@@ -1848,7 +1398,7 @@ mod tests {
     #[test]
     fn rematch_resets_the_finished_match() {
         let me = uid(10);
-        let mut room = Room::new(me, RoomMode::Online { open: true });
+        let mut room = Room::new(me, true);
         room.apply_lobby_setup(
             me,
             &LobbySetup {
@@ -1859,16 +1409,8 @@ mod tests {
                 radius_sq: 2,
                 my_team: None,
                 seats: vec![
-                    LobbySeat {
-                        bot: true,
-                        label: 1,
-                        team: 2,
-                    },
-                    LobbySeat {
-                        bot: true,
-                        label: 2,
-                        team: 3,
-                    },
+                    LobbySeat { bot: true, team: 2 },
+                    LobbySeat { bot: true, team: 3 },
                 ],
             },
         )
