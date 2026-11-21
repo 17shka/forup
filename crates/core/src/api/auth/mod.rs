@@ -18,12 +18,17 @@ pub const PASSWORD_MIN_CHARS: usize = 6;
 
 /// Field rules shared by the browser form and the server so they can never
 /// drift apart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum ValidationError {
+    #[strum(serialize = "auth_name_short")]
     NameTooShort,
+    #[strum(serialize = "auth_name_long")]
     NameTooLong,
+    #[strum(serialize = "auth_invalid_email")]
     InvalidEmail,
+    #[strum(serialize = "auth_password_length")]
     PasswordTooShort,
+    #[strum(serialize = "auth_password_mismatch")]
     PasswordMismatch,
 }
 

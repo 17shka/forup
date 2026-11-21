@@ -1,13 +1,13 @@
-use forup_core::api::game::prelude::BoardCode;
+use forup_core::api::game::prelude::{BoardCode, ExplosionMode};
 use leptos::prelude::*;
-use thaw::{Card, CardHeader, Slider, Switch};
+use thaw::{Card, CardHeader, Select, SelectSize, Slider, Switch};
 
 use crate::game::{GamePhase, GameSession};
 use crate::i18n::*;
 
 /// Pre-match settings as flat rows: board size slider, the automatic cell
-/// distribution switch, the safe radius slider and the Lossy/Lossless
-/// explosion toggle.
+/// distribution switch, the safe radius slider and the explosion mode
+/// dropdown selector.
 ///
 /// Онлайн: панель видит и меняет только администратор комнаты, а
 /// источником истины становится серверный снапшот.
@@ -23,11 +23,7 @@ pub fn GameSettingsPanel() -> impl IntoView {
             .state
             .with_untracked(|game| game.automatic_distribution()),
     );
-    let lossless = RwSignal::new(
-        session
-            .state
-            .with_untracked(|game| game.lossless_explosions()),
-    );
+    let explosion_mode = RwSignal::new(session.state.with_untracked(|game| game.explosion_mode()));
     let spacing = RwSignal::new(f64::from(
         session.state.with_untracked(|game| game.safe_radius()),
     ));
@@ -38,11 +34,11 @@ pub fn GameSettingsPanel() -> impl IntoView {
     // бы слайдер обратно прямо во время перетаскивания.
     Effect::new(move |_| {
         session.net_busy.get();
-        let (ordinal, distribution, explosions, radius) = session.state.with(|game| {
+        let (ordinal, distribution, mode, radius) = session.state.with(|game| {
             (
                 game.board_size().ordinal(),
                 game.automatic_distribution(),
-                game.lossless_explosions(),
+                game.explosion_mode(),
                 game.safe_radius(),
             )
         });
@@ -52,8 +48,8 @@ pub fn GameSettingsPanel() -> impl IntoView {
         if automatic.get_untracked() != distribution {
             automatic.set(distribution);
         }
-        if lossless.get_untracked() != explosions {
-            lossless.set(explosions);
+        if explosion_mode.get_untracked() != mode {
+            explosion_mode.set(mode);
         }
         if spacing.get_untracked().round() as u8 != radius {
             spacing.set(f64::from(radius));
@@ -128,18 +124,18 @@ pub fn GameSettingsPanel() -> impl IntoView {
         current
     });
 
-    Effect::new(move |previous: Option<bool>| {
-        let current = lossless.get();
+    Effect::new(move |previous: Option<ExplosionMode>| {
+        let current = explosion_mode.get();
         if previous.is_some_and(|previous| previous != current) {
             let changed = session
                 .state
-                .with_untracked(|game| game.lossless_explosions() != current);
+                .with_untracked(|game| game.explosion_mode() != current);
             if changed {
                 if session.room.get_untracked().is_some() {
-                    session.net_set_lossless_explosions(current);
+                    session.net_set_explosion_mode(current);
                 } else {
                     session.dispatch(move |game| {
-                        game.set_lossless_explosions(current);
+                        game.set_explosion_mode(current);
                         Ok(())
                     });
                 }
@@ -164,24 +160,54 @@ pub fn GameSettingsPanel() -> impl IntoView {
             spacing_max()
         )
     };
-    let lossy_label = Memo::new(move |_| t_string!(i18n, lossy).to_string());
-    let lossless_label = Memo::new(move |_| t_string!(i18n, lossless).to_string());
-    let group_label = Memo::new(move |_| t_string!(i18n, explosion_mode).to_string());
+    let reset_label = Memo::new(move |_| t_string!(i18n, reset_owner_on_zero).to_string());
 
-    let lossy_class = move || {
-        let mut class = String::from("explosion-toggle__option explosion-toggle__option--lossy");
-        if !lossless.get() {
-            class.push_str(" explosion-toggle__option--active");
+    let reset_owner = RwSignal::new(explosion_mode.get_untracked().reset_owner_on_zero());
+
+    // explosion_mode drives reset_owner for external changes (server snapshot)
+    Effect::new(move |_| {
+        let mode = explosion_mode.get();
+        let reset = mode.reset_owner_on_zero();
+        if reset_owner.get_untracked() != reset {
+            reset_owner.set(reset);
         }
-        class
-    };
-    let lossless_class = move || {
-        let mut class = String::from("explosion-toggle__option explosion-toggle__option--lossless");
-        if lossless.get() {
-            class.push_str(" explosion-toggle__option--active");
+    });
+
+    // reset_owner toggle updates the bool inside the current variant
+    Effect::new(move |previous: Option<bool>| {
+        let current = reset_owner.get();
+        if previous.is_some_and(|previous| previous != current) {
+            let mode = explosion_mode.get_untracked();
+            let new_mode = mode.with_reset_owner(current);
+            if mode != new_mode {
+                explosion_mode.set(new_mode);
+            }
         }
-        class
-    };
+        current
+    });
+
+    let explosion_mode_str = RwSignal::new(explosion_mode.get_untracked().to_string());
+
+    Effect::new(move |_| {
+        let mode = explosion_mode.get();
+        let key = mode.to_string();
+        if explosion_mode_str.get_untracked() != key {
+            explosion_mode_str.set(key);
+        }
+    });
+
+    Effect::new(move |prev: Option<String>| {
+        let key = explosion_mode_str.get();
+        if prev.is_some_and(|p| p != key) {
+            let reset = explosion_mode.get_untracked().reset_owner_on_zero();
+            if let Some(mode) = ExplosionMode::from_key(&key, reset) {
+                if explosion_mode.get_untracked() != mode {
+                    explosion_mode.set(mode);
+                }
+            }
+        }
+        key
+    });
 
     view! {
         <Show when=move || {
@@ -228,36 +254,37 @@ pub fn GameSettingsPanel() -> impl IntoView {
                 <div class="settings-row">
                     <span class="settings-row__label">{t!(i18n, explosion_mode)}</span>
                     <div class="settings-row__right">
-                        <div class="explosion-toggle" role="group" aria-label=group_label>
-                            <button
-                                type="button"
-                                class=lossy_class
-                                aria-pressed=move || (!lossless.get()).to_string()
-                                aria-label=lossy_label
-                                title=lossy_label
-                                on:click=move |_| lossless.set(false)
+                        <Select
+                            class="settings-select"
+                            size=SelectSize::Large
+                            value=explosion_mode_str
+                        >
+                            <option
+                                value="border_loss"
+                                selected=move || explosion_mode_str.get() == "border_loss"
                             >
-                                <span
-                                    class="explosion-toggle__dot explosion-toggle__dot--lossy"
-                                    aria-hidden="true"
-                                ></span>
-                                <span class="explosion-toggle__text">{lossy_label}</span>
-                            </button>
-                            <button
-                                type="button"
-                                class=lossless_class
-                                aria-pressed=move || lossless.get().to_string()
-                                aria-label=lossless_label
-                                title=lossless_label
-                                on:click=move |_| lossless.set(true)
+                                {t!(i18n, border_loss)}
+                            </option>
+                            <option
+                                value="border_keep"
+                                selected=move || explosion_mode_str.get() == "border_keep"
                             >
-                                <span
-                                    class="explosion-toggle__dot explosion-toggle__dot--lossless"
-                                    aria-hidden="true"
-                                ></span>
-                                <span class="explosion-toggle__text">{lossless_label}</span>
-                            </button>
-                        </div>
+                                {t!(i18n, border_keep)}
+                            </option>
+                            <option
+                                value="critical_mass"
+                                selected=move || explosion_mode_str.get() == "critical_mass"
+                            >
+                                {t!(i18n, critical_mass)}
+                            </option>
+                        </Select>
+                    </div>
+                </div>
+
+                <div class="settings-row settings-row--switch">
+                    <span class="settings-row__label">{reset_label}</span>
+                    <div class="settings-row__right">
+                        <Switch checked=reset_owner />
                     </div>
                 </div>
             </Card>

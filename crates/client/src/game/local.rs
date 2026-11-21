@@ -58,7 +58,8 @@ pub struct Participant {
     pub ready: Option<bool>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::Display, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum GamePhase {
     /// Waiting for the local player to press Ready.
     Lobby,
@@ -66,7 +67,8 @@ pub enum GamePhase {
     Finished,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::Display, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum MoveMode {
     Increase,
     Decrease,
@@ -96,6 +98,7 @@ pub struct BoardView {
     pub board: Board,
     pub phase: GamePhase,
     pub current_team: Option<TeamId>,
+    pub explosion_mode: ExplosionMode,
     pub animation_tick: u64,
     changes: Vec<i16>,
 }
@@ -739,7 +742,7 @@ impl LocalGame {
             width: size.width().get(),
             height: size.height().get(),
             automatic: self.automatic_distribution,
-            lossless: self.lossless_explosions(),
+            explosion_mode: self.game.explosion_mode(),
             radius_sq: self.safe_radius(),
             my_team,
             seats,
@@ -771,19 +774,13 @@ impl LocalGame {
         }
     }
 
-    pub fn lossless_explosions(&self) -> bool {
-        self.game.explosion_mode() == ExplosionMode::Lossless
+    pub fn explosion_mode(&self) -> ExplosionMode {
+        self.game.explosion_mode()
     }
 
-    pub fn set_lossless_explosions(&mut self, value: bool) {
+    pub fn set_explosion_mode(&mut self, mode: ExplosionMode) {
         self.enter_edit_mode();
         if !self.game.is_started() {
-            let mode = if value {
-                ExplosionMode::Lossless
-            } else {
-                ExplosionMode::Lossy
-            };
-            // Игра ещё не началась, поэтому смена режима не может провалиться.
             let _ = self.game.set_explosion_mode(mode);
         }
     }
@@ -1280,6 +1277,7 @@ impl LocalGame {
             board: self.game.board().clone(),
             phase: self.phase,
             current_team: self.current_team(),
+            explosion_mode: self.game.explosion_mode(),
             animation_tick: self.animation_tick,
             changes: self.changes.clone(),
         }
@@ -1826,14 +1824,15 @@ mod tests {
     #[test]
     fn explosion_mode_is_a_match_setting() {
         let mut game = LocalGame::new();
-        assert!(game.lossless_explosions());
+        assert_eq!(game.explosion_mode(), ExplosionMode::BorderKeep(false));
 
-        game.set_lossless_explosions(false);
-        assert!(!game.lossless_explosions());
+        game.set_explosion_mode(ExplosionMode::BorderLoss(false));
+        assert_eq!(game.explosion_mode(), ExplosionMode::BorderLoss(false));
 
         game.ready().unwrap();
-        game.set_lossless_explosions(true);
-        assert!(!game.lossless_explosions());
+        game.set_explosion_mode(ExplosionMode::CriticalMass(true));
+        // Игра уже началась, поэтому режим не меняется.
+        assert_eq!(game.explosion_mode(), ExplosionMode::BorderLoss(false));
     }
 
     #[test]

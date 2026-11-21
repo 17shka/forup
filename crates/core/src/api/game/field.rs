@@ -145,8 +145,42 @@ impl Board {
         self.cells.iter().any(|c| c.owner == Some(team))
     }
 
-    pub fn is_saturated(&self) -> bool {
-        self.cells.iter().all(|c| c.can_explode())
+    pub fn is_saturated(&self, mode: ExplosionMode) -> bool {
+        self.cells
+            .iter()
+            .enumerate()
+            .all(|(slot, c)| self.can_explode_at(Self::pos_from_slot(slot), mode, *c))
+    }
+
+    pub fn cell_threshold(&self, pos: BoardCode, mode: ExplosionMode) -> i8 {
+        let cell = self[pos];
+        match cell.ability {
+            CellAbility::Bomb => 0,
+            CellAbility::None => match mode {
+                ExplosionMode::BorderLoss(_) | ExplosionMode::BorderKeep(_) => {
+                    cell.ability.max_value()
+                }
+                ExplosionMode::CriticalMass(_) => {
+                    let (x, y) = self.xy_from_slot(usize::from(pos.slot()));
+                    let w = self.size.width().get();
+                    let h = self.size.height().get();
+                    let is_corner = (x == 0 || x == w - 1) && (y == 0 || y == h - 1);
+                    let is_edge = x == 0 || x == w - 1 || y == 0 || y == h - 1;
+                    if is_corner {
+                        2
+                    } else if is_edge {
+                        3
+                    } else {
+                        4
+                    }
+                }
+            },
+        }
+    }
+
+    pub fn can_explode_at(&self, pos: BoardCode, mode: ExplosionMode, cell: CellData) -> bool {
+        let threshold = self.cell_threshold(pos, mode);
+        cell.can_explode_with(threshold)
     }
 
     pub fn mass_leader(&self) -> Option<TeamId> {
@@ -202,10 +236,12 @@ impl Board {
     /// сохранение и продолжится на следующем ходу.
     pub(super) fn explode_activated(&mut self, mode: ExplosionMode) -> bool {
         let mut blasts = Vec::new();
+        let reset_owner_on_zero = mode.reset_owner_on_zero();
 
         for (slot, &cell) in self.cells.iter().enumerate() {
-            if cell.activated && cell.can_explode() {
-                blasts.push(Blast::new(self, Self::pos_from_slot(slot), cell, mode));
+            let pos = Self::pos_from_slot(slot);
+            if cell.activated && self.can_explode_at(pos, mode, cell) {
+                blasts.push(Blast::new(self, pos, cell, mode));
             }
         }
 
@@ -220,6 +256,9 @@ impl Board {
             let cell = &mut self[b.pos];
             cell.value = b.remainder;
             cell.ability = CellAbility::None;
+            if reset_owner_on_zero && b.remainder <= 0 {
+                cell.owner = None;
+            }
         }
 
         for b in blasts.iter() {
@@ -241,14 +280,15 @@ impl Board {
         // После раздачи урона пересчитываем отметку взорванной клетки: она
         // могла снова зарядиться от соседей и взорвётся в следующем проходе.
         for b in blasts.iter() {
-            let cell = &mut self[b.pos];
-            cell.activated = cell.can_explode();
+            let pos = b.pos;
+            let cell = self[b.pos];
+            self[pos].activated = self.can_explode_at(pos, mode, cell);
         }
 
         true
     }
 
-    pub(super) fn evaluate(&self, team: TeamId, cfg: &BotConfig) -> Score {
+    pub(super) fn evaluate(&self, team: TeamId, cfg: &BotConfig, mode: ExplosionMode) -> Score {
         let mut total = 0;
 
         for (slot, cell) in self.cells.iter().enumerate() {
@@ -256,7 +296,7 @@ impl Board {
                 Some(owner) if owner == team => {
                     let value = Score::from(cell.value);
                     let mut score = cfg.own_cell_bonus + value * cfg.own_value_weight;
-                    if self.is_threatened(Self::pos_from_slot(slot), *cell, team) {
+                    if self.is_threatened(Self::pos_from_slot(slot), *cell, team, mode) {
                         score -= cfg.threat_penalty;
                     }
                     total += score;
@@ -270,11 +310,17 @@ impl Board {
         total
     }
 
-    fn is_threatened(&self, pos: BoardCode, cell: CellData, team: TeamId) -> bool {
+    fn is_threatened(
+        &self,
+        pos: BoardCode,
+        cell: CellData,
+        team: TeamId,
+        mode: ExplosionMode,
+    ) -> bool {
         cell.ability.targets().iter().any(|&(direction, _)| {
             self.neighbor(pos, direction).is_some_and(|n| {
                 let other = self[n];
-                other.owner.is_some_and(|o| o != team) && other.can_explode()
+                other.owner.is_some_and(|o| o != team) && self.can_explode_at(n, mode, other)
             })
         })
     }
@@ -309,18 +355,22 @@ impl Blast {
         let targets = cell.ability.targets();
         let output_slots = targets.iter().filter(|&&(_, damage)| damage == 0).count() as i8;
 
-        let (share, remainder) = if output_slots > 0 {
-            let share = cell.value / output_slots;
-            let remainder = cell.value % output_slots;
-            let remainder = if mode == ExplosionMode::Lossless {
-                // Lossless explosions keep the shares that cannot be delivered
+        let present = targets
+            .iter()
+            .filter(|&&(direction, damage)| damage == 0 && board.neighbor(pos, direction).is_some())
+            .count() as i8;
+
+        let divisor = match mode {
+            ExplosionMode::BorderLoss(_) | ExplosionMode::BorderKeep(_) => output_slots,
+            ExplosionMode::CriticalMass(_) => present.max(1),
+        };
+
+        let (share, remainder) = if divisor > 0 {
+            let share = cell.value / divisor;
+            let remainder = cell.value % divisor;
+            let remainder = if matches!(mode, ExplosionMode::BorderKeep(_)) {
+                // BorderKeep explosions keep the shares that cannot be delivered
                 // to a neighbour (for example, at the border) in the cell.
-                let present = targets
-                    .iter()
-                    .filter(|&&(direction, damage)| {
-                        damage == 0 && board.neighbor(pos, direction).is_some()
-                    })
-                    .count() as i8;
                 remainder + (output_slots - present) * share
             } else {
                 remainder

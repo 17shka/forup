@@ -19,8 +19,12 @@ pub struct CellData {
 
 impl CellData {
     pub fn can_explode(&self) -> bool {
+        self.can_explode_with(self.ability.max_value())
+    }
+
+    pub fn can_explode_with(&self, threshold: i8) -> bool {
         match self.ability {
-            CellAbility::None => self.value >= self.ability.max_value(),
+            CellAbility::None => self.value >= threshold,
             CellAbility::Bomb => true,
         }
     }
@@ -33,7 +37,19 @@ impl CellData {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum CellAbility {
     #[default]
     None,

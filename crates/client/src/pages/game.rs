@@ -48,7 +48,7 @@ fn cell_class(view: &BoardView, pos: BoardCode, legal: SlotMask) -> String {
             // Ход другой команды: её клетки показываются тусклее.
             class.push_str(" board-cell--dim");
         }
-        if cell.can_explode() {
+        if view.board.can_explode_at(pos, view.explosion_mode, *cell) {
             class.push_str(" board-cell--charged");
         }
     }
@@ -69,8 +69,38 @@ fn cell_style(view: &BoardView, pos: BoardCode, hues: &[(TeamId, u16)]) -> Strin
     let Some(cell) = view.board.get(pos) else {
         return String::new();
     };
+
+    let threshold = view.board.cell_threshold(pos, view.explosion_mode);
+    let value = cell.value;
+    const MAX_DISTANCE: f32 = 4.0;
+
+    let (border_start, border_end, border_opacity) = if value == 0 {
+        (
+            String::from("transparent"),
+            String::from("transparent"),
+            "0",
+        )
+    } else {
+        let t = if value > 0 {
+            let remaining = threshold as f32 - value as f32;
+            1.0 - (remaining / MAX_DISTANCE).clamp(0.0, 1.0)
+        } else {
+            (value.abs() as f32 / MAX_DISTANCE).clamp(0.0, 1.0)
+        };
+        let color = if value > 0 {
+            lerp_color(COLOR_GREEN, COLOR_RED, t)
+        } else {
+            lerp_color(COLOR_GREEN, COLOR_BLUE, t)
+        };
+        let opacity = if cell.owner.is_none() { "0.5" } else { "1" };
+        (color.clone(), color, opacity)
+    };
+
     let Some(owner) = cell.owner else {
-        return String::new();
+        return format!(
+            "--cell-border-start: {border_start}; --cell-border-end: {border_end}; \
+             --cell-border-opacity: {border_opacity};"
+        );
     };
     let hue = hues
         .iter()
@@ -78,7 +108,11 @@ fn cell_style(view: &BoardView, pos: BoardCode, hues: &[(TeamId, u16)]) -> Strin
         .map(|&(_, hue)| hue)
         .unwrap_or(0);
     let brightness = (1.0 + 0.05 * f32::from(cell.value)).clamp(0.5, 1.8);
-    format!("--team-hue: {hue}; --cell-brightness: {brightness:.2};")
+    format!(
+        "--team-hue: {hue}; --cell-brightness: {brightness:.2}; \
+         --cell-border-start: {border_start}; --cell-border-end: {border_end}; \
+         --cell-border-opacity: {border_opacity};"
+    )
 }
 
 fn cell_value(view: &BoardView, pos: BoardCode) -> String {
@@ -87,6 +121,22 @@ fn cell_value(view: &BoardView, pos: BoardCode) -> String {
         .filter(|cell| cell.value > 0)
         .map(|cell| cell.value.to_string())
         .unwrap_or_default()
+}
+
+const COLOR_GREEN: [u8; 3] = [0x22, 0xc5, 0x5e];
+const COLOR_RED: [u8; 3] = [0xef, 0x44, 0x44];
+const COLOR_BLUE: [u8; 3] = [0x3b, 0x82, 0xf6];
+
+fn lerp_channel(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as u8
+}
+
+fn lerp_color(from: [u8; 3], to: [u8; 3], t: f32) -> String {
+    let t = t.clamp(0.0, 1.0);
+    let r = lerp_channel(from[0], to[0], t);
+    let g = lerp_channel(from[1], to[1], t);
+    let b = lerp_channel(from[2], to[2], t);
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 #[component]
@@ -159,11 +209,13 @@ pub fn GamePage() -> impl IntoView {
 
     let banner_class = move || {
         let mut class = String::from("turn-banner");
-        session.state.with(|game| match game.phase {
-            GamePhase::Lobby => class.push_str(" turn-banner--lobby"),
-            GamePhase::Playing if game.is_human_turn() => class.push_str(" turn-banner--you"),
-            GamePhase::Playing => class.push_str(" turn-banner--other"),
-            GamePhase::Finished => class.push_str(" turn-banner--over"),
+        session.state.with(|game| {
+            let suffix: &'static str = match game.phase {
+                GamePhase::Playing if game.is_human_turn() => "you",
+                GamePhase::Playing => "other",
+                _ => game.phase.into(),
+            };
+            class.push_str(&format!(" turn-banner--{}", suffix));
         });
         class
     };
@@ -216,7 +268,7 @@ pub fn GamePage() -> impl IntoView {
     // варианта: ошибки движка переиспользуют локальные тексты.
     let net_error_text = move |error: &NetError| -> String {
         match error {
-            NetError::Room(RoomError::Game(game_error)) => error_text(game_error),
+            NetError::Room(RoomError::Game(e)) => error_text(e),
             NetError::Room(RoomError::MembersNotReady) => {
                 t_string!(i18n, error_members_not_ready).to_string()
             }
@@ -332,24 +384,24 @@ pub fn GamePage() -> impl IntoView {
             || session.state.with(LocalGame::own_ready) == Some(true)
     };
 
-    // Переключатель режима хода — сегментированный, как Lossy/Lossless в
+    // Переключатель режима хода — сегментированный, как режим взрывов в
     // настройках партии: активная половина подсвечена градиентом своего цвета.
-    let decrease_label = move || t_string!(i18n, decrease).to_string();
-    let increase_label = move || t_string!(i18n, increase).to_string();
-    let decrease_class = move || {
-        let mut class = String::from("mode-toggle__option mode-toggle__option--decrease");
-        if session.mode.get() == MoveMode::Decrease {
+    let mode_label = move |mode: MoveMode| match mode {
+        MoveMode::Increase => t_string!(i18n, increase).to_string(),
+        MoveMode::Decrease => t_string!(i18n, decrease).to_string(),
+    };
+    let mode_class = move |mode: MoveMode| {
+        let suffix: &'static str = mode.into();
+        let mut class = format!("mode-toggle__option mode-toggle__option--{}", suffix);
+        if session.mode.get() == mode {
             class.push_str(" mode-toggle__option--active");
         }
         class
     };
-    let increase_class = move || {
-        let mut class = String::from("mode-toggle__option mode-toggle__option--increase");
-        if session.mode.get() == MoveMode::Increase {
-            class.push_str(" mode-toggle__option--active");
-        }
-        class
-    };
+    let decrease_label = move || mode_label(MoveMode::Decrease);
+    let increase_label = move || mode_label(MoveMode::Increase);
+    let decrease_class = move || mode_class(MoveMode::Decrease);
+    let increase_class = move || mode_class(MoveMode::Increase);
     // Уменьшение недоступно (нет подходящих клеток): половина «Уменьшить»
     // блокируется реактивно, как раньше блокировался чекбокс.
     let decrease_disabled = move || !session.state.with(LocalGame::can_decrease);
@@ -402,7 +454,10 @@ pub fn GamePage() -> impl IntoView {
         }
         set_timeout(
             move || {
-                if pump_generation.get_untracked() == generation {
+                if pump_generation
+                    .try_get_untracked()
+                    .map_or(false, |g| g == generation)
+                {
                     session.dispatch(|game| game.animation_step().map(|_| ()));
                 }
             },
@@ -494,9 +549,16 @@ pub fn GamePage() -> impl IntoView {
                             })
                             .collect_view();
 
+                        let board_class = move || {
+                            if settings.show_cell_borders.get() {
+                                "board board--borders"
+                            } else {
+                                "board board--no-borders"
+                            }
+                        };
                         view! {
                             <div
-                                class="board"
+                                class=board_class
                                 style=format!(
                                     "--board-cols: {cols}; --board-rows: {rows}; aspect-ratio: {cols} / {rows};"
                                 )
@@ -519,55 +581,7 @@ pub fn GamePage() -> impl IntoView {
                     <Show when=move || session.state.with(|game| game.phase != GamePhase::Lobby)>
                         <div class=banner_class>
                             <span class=turn_text_class style=turn_text_style>{turn_text}</span>
-                            <div class="turn-banner__side">
-                                <Show
-                                    when=move || {
-                                        session.state.with(|game| {
-                                            game.phase == GamePhase::Playing
-                                                && !game.is_choosing_start_cell()
-                                                && game.is_human_turn()
-                                        })
-                                    }
-                                >
-                                    <div class="mode-toggle" role="group">
-                                        <button
-                                            type="button"
-                                            class=decrease_class
-                                            aria-pressed=move || {
-                                                (session.mode.get() == MoveMode::Decrease)
-                                                    .to_string()
-                                            }
-                                            aria-label=decrease_label
-                                            title=decrease_label
-                                            disabled=decrease_disabled
-                                            on:click=on_decrease
-                                        >
-                                            <span
-                                                class="mode-toggle__dot mode-toggle__dot--decrease"
-                                                aria-hidden="true"
-                                            ></span>
-                                            <span class="mode-toggle__text">{decrease_label}</span>
-                                        </button>
-                                        <button
-                                            type="button"
-                                            class=increase_class
-                                            aria-pressed=move || {
-                                                (session.mode.get() == MoveMode::Increase)
-                                                    .to_string()
-                                            }
-                                            aria-label=increase_label
-                                            title=increase_label
-                                            on:click=on_increase
-                                        >
-                                            <span
-                                                class="mode-toggle__dot mode-toggle__dot--increase"
-                                                aria-hidden="true"
-                                            ></span>
-                                            <span class="mode-toggle__text">{increase_label}</span>
-                                        </button>
-                                    </div>
-                                </Show>
-                            </div>
+                            <div class="turn-banner__side"></div>
                         </div>
                     </Show>
 
@@ -632,6 +646,54 @@ pub fn GamePage() -> impl IntoView {
 
                     <GameSettingsPanel/>
                 </div>
+
+                <Show
+                    when=move || {
+                        session.state.with(|game| {
+                            game.phase == GamePhase::Playing
+                                && !game.is_choosing_start_cell()
+                                && game.is_human_turn()
+                        })
+                    }
+                >
+                    <div class="mode-toggle mode-toggle--actions" role="group">
+                        <button
+                            type="button"
+                            class=decrease_class
+                            aria-pressed=move || {
+                                (session.mode.get() == MoveMode::Decrease)
+                                    .to_string()
+                            }
+                            aria-label=decrease_label
+                            title=decrease_label
+                            disabled=decrease_disabled
+                            on:click=on_decrease
+                        >
+                            <span
+                                class="mode-toggle__dot mode-toggle__dot--decrease"
+                                aria-hidden="true"
+                            ></span>
+                            <span class="mode-toggle__text">{decrease_label}</span>
+                        </button>
+                        <button
+                            type="button"
+                            class=increase_class
+                            aria-pressed=move || {
+                                (session.mode.get() == MoveMode::Increase)
+                                    .to_string()
+                            }
+                            aria-label=increase_label
+                            title=increase_label
+                            on:click=on_increase
+                        >
+                            <span
+                                class="mode-toggle__dot mode-toggle__dot--increase"
+                                aria-hidden="true"
+                            ></span>
+                            <span class="mode-toggle__text">{increase_label}</span>
+                        </button>
+                    </div>
+                </Show>
 
                 <div class="game-actions">
                     <Button

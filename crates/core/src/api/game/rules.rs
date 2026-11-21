@@ -1,5 +1,6 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use strum::{Display, IntoStaticStr};
 
 use crate::api::{auth::PlayerId, game::circle::prelude::*};
 
@@ -10,22 +11,74 @@ use super::ids::{
 };
 
 /// Правило распределения массы при взрыве клетки.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Поле `bool` в каждом варианте — флаг «очищать пустые клетки»: если `true`,
+/// клетка теряет владельца при взрыве, когда её значение становится ≤ 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Display, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ExplosionMode {
-    Lossy,
-    #[default]
-    Lossless,
+    /// При взрыве на границе доски недостающие доли теряются.
+    BorderLoss(bool),
+    /// При взрыве на границе доски недостающие доли остаются в клетке.
+    BorderKeep(bool),
+    /// Порог взрыва зависит от позиции клетки: 4 центр, 3 край, 2 угол.
+    CriticalMass(bool),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl Default for ExplosionMode {
+    fn default() -> Self {
+        ExplosionMode::BorderKeep(false)
+    }
+}
+
+impl ExplosionMode {
+    pub fn reset_owner_on_zero(self) -> bool {
+        match self {
+            ExplosionMode::BorderLoss(v)
+            | ExplosionMode::BorderKeep(v)
+            | ExplosionMode::CriticalMass(v) => v,
+        }
+    }
+
+    /// Replaces the inner `bool` without changing the discriminant.
+    pub fn with_reset_owner(self, value: bool) -> Self {
+        match self {
+            ExplosionMode::BorderLoss(_) => ExplosionMode::BorderLoss(value),
+            ExplosionMode::BorderKeep(_) => ExplosionMode::BorderKeep(value),
+            ExplosionMode::CriticalMass(_) => ExplosionMode::CriticalMass(value),
+        }
+    }
+
+    /// Builds a variant from its `strum` key and the inner `bool`.
+    ///
+    /// Keeps the mapping in one place so the UI and the engine stay in sync.
+    pub fn from_key(key: &str, reset: bool) -> Option<Self> {
+        match key {
+            "border_loss" => Some(ExplosionMode::BorderLoss(reset)),
+            "border_keep" => Some(ExplosionMode::BorderKeep(reset)),
+            "critical_mass" => Some(ExplosionMode::CriticalMass(reset)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum GameError {
+    #[strum(serialize = "error_game_not_started")]
     GameNotStarted,
+    #[strum(serialize = "error_character_not_found")]
     CharacterNotFound,
+    #[strum(serialize = "error_character_eliminated")]
     CharacterEliminated,
+    #[strum(serialize = "error_not_your_turn")]
     NotYourTurn,
+    #[strum(serialize = "error_out_of_bounds")]
     PositionOutOfBounds,
+    #[strum(serialize = "error_first_move_empty")]
     FirstMoveRequiresEmptyCell,
+    #[strum(serialize = "error_cell_not_owned")]
     CellNotOwnedByTeam,
+    #[strum(serialize = "error_cell_cannot_decrease")]
     CellCannotBeDecreased,
     NoMembers,
     NotEnoughMembers,
@@ -34,6 +87,7 @@ pub enum GameError {
     CharacterIdSpaceExhausted,
     BotIdSpaceExhausted,
     /// Стартовая клетка ближе к занятой клетке, чем разрешает [`Game::safe_radius`].
+    #[strum(serialize = "error_start_too_close")]
     StartCellTooClose,
 }
 
@@ -647,7 +701,7 @@ impl Game {
             return false;
         }
         Self::sole_surviving_team(&self.board, &self.characters).is_none()
-            && !self.board.is_saturated()
+            && !self.board.is_saturated(self.explosion_mode)
     }
 
     /// Доигрывает все волны взрывов без пошаговой анимации.
@@ -665,7 +719,7 @@ impl Game {
             self.award_win(winner);
             return Ok(Some(winner));
         }
-        if self.board.is_saturated() {
+        if self.board.is_saturated(self.explosion_mode) {
             return self.outcome();
         }
         self.advance_turn();
@@ -693,7 +747,7 @@ impl Game {
             return Ok(Some(winner));
         }
 
-        if self.board.is_saturated() {
+        if self.board.is_saturated(self.explosion_mode) {
             return Ok(self.finish_by_mass());
         }
 
@@ -1162,7 +1216,7 @@ mod game_rule_tests {
     }
 
     #[test]
-    fn lossless_border_explosion_keeps_the_missing_shares() {
+    fn border_keep_explosion_keeps_the_missing_shares() {
         let mut board = Board::new(size(3, 3));
         board[pos(0)] = CellData {
             value: 3,
@@ -1171,7 +1225,7 @@ mod game_rule_tests {
         };
         // The corner cell becomes 4, explodes and has only two of its four
         // cardinal targets on the board.
-        board.apply_move(pos(0), tid(1), 1, ExplosionMode::Lossless);
+        board.apply_move(pos(0), tid(1), 1, ExplosionMode::BorderKeep(false));
 
         assert_eq!(board[pos(0)].value, 2);
         assert_eq!(board[pos(1)].value, 1);
@@ -1180,14 +1234,14 @@ mod game_rule_tests {
     }
 
     #[test]
-    fn lossy_border_explosion_dissipates_the_missing_shares() {
+    fn border_loss_explosion_dissipates_the_missing_shares() {
         let mut board = Board::new(size(3, 3));
         board[pos(0)] = CellData {
             value: 3,
             owner: Some(tid(1)),
             ..CellData::default()
         };
-        board.apply_move(pos(0), tid(1), 1, ExplosionMode::Lossy);
+        board.apply_move(pos(0), tid(1), 1, ExplosionMode::BorderLoss(false));
 
         assert_eq!(board[pos(0)].value, 0);
         assert_eq!(board[pos(1)].value, 1);

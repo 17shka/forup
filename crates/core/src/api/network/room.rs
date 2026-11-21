@@ -45,7 +45,21 @@ impl MemberData {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    strum::Display,
+    strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum Status {
     #[default]
     Inactive,
@@ -53,16 +67,19 @@ pub enum Status {
     Ready,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum RoomError {
+    #[strum(serialize = "error_room_not_found")]
     NotFound,
     NotOwner,
     PermissionDenied,
+    #[strum(serialize = "error_members_not_ready")]
     MembersNotReady,
     MemberNotFound,
     InvalidBoardSize,
     /// Лобби-снимок не годится: неверный размер доски или команда места.
     InvalidLobby,
+    #[strum(serialize = "error_room_closed")]
     Closed,
     Game(GameError),
 }
@@ -251,17 +268,12 @@ impl Room {
         Ok(())
     }
 
-    pub fn set_lossless_explosions(
+    pub fn set_explosion_mode(
         &mut self,
         actor: PlayerId,
-        lossless: bool,
+        mode: ExplosionMode,
     ) -> Result<(), RoomError> {
         self.ensure_admin(actor)?;
-        let mode = if lossless {
-            ExplosionMode::Lossless
-        } else {
-            ExplosionMode::Lossy
-        };
         self.game.set_explosion_mode(mode)?;
         self.touch();
         Ok(())
@@ -695,11 +707,7 @@ impl Room {
             .and_then(|(w, h)| BoardCode::from_size(w, h))
             .ok_or(RoomError::InvalidLobby)?;
         self.game.set_board_size(size)?;
-        self.game.set_explosion_mode(if setup.lossless {
-            ExplosionMode::Lossless
-        } else {
-            ExplosionMode::Lossy
-        })?;
+        self.game.set_explosion_mode(setup.explosion_mode)?;
         self.automatic_distribution = setup.automatic;
 
         // Место создателя: на своей команде или без места — оператор комнаты.
@@ -1260,7 +1268,7 @@ mod tests {
                 width: 5,
                 height: 7,
                 automatic: false,
-                lossless: false,
+                explosion_mode: ExplosionMode::BorderLoss(false),
                 radius_sq: 2,
                 my_team: None,
                 seats: vec![
@@ -1277,7 +1285,10 @@ mod tests {
 
         let size = room.game().board().size();
         assert_eq!((size.width().get(), size.height().get()), (5, 7));
-        assert_eq!(room.game().explosion_mode(), ExplosionMode::Lossy);
+        assert_eq!(
+            room.game().explosion_mode(),
+            ExplosionMode::BorderLoss(false)
+        );
         assert!(!room.automatic_distribution());
         assert_eq!(room.game().characters().len(), 3);
         assert!(room.members().contains_key(&me));
@@ -1318,7 +1329,7 @@ mod tests {
                 width: 5,
                 height: 5,
                 automatic: true,
-                lossless: false,
+                explosion_mode: ExplosionMode::BorderLoss(false),
                 radius_sq: 2,
                 my_team: None,
                 seats: vec![
@@ -1405,7 +1416,7 @@ mod tests {
                 width: 5,
                 height: 5,
                 automatic: true,
-                lossless: false,
+                explosion_mode: ExplosionMode::BorderLoss(false),
                 radius_sq: 2,
                 my_team: None,
                 seats: vec![

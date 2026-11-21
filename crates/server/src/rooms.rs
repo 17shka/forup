@@ -402,7 +402,7 @@ async fn set_distribution(
     build_state(&state, id, me, &directory)
 }
 
-/// `POST /api/rooms/{id}/explosions`: взрывы без потерь (администратор).
+/// `POST /api/rooms/{id}/explosions`: режим взрывов (администратор).
 async fn set_explosions(
     Extension(state): Extension<ApiState>,
     headers: HeaderMap,
@@ -426,7 +426,7 @@ async fn set_explosions(
     let Some(room) = directory.get_mut(id) else {
         return room_error(RoomError::NotFound);
     };
-    if let Err(error) = room.set_lossless_explosions(me, request.lossless) {
+    if let Err(error) = room.set_explosion_mode(me, request.mode) {
         return room_error(error);
     }
     persist(&state, &directory);

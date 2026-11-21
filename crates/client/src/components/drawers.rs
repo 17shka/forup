@@ -3,7 +3,7 @@ use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use thaw::{
     Button, ButtonAppearance, DrawerBody, DrawerHeader, DrawerHeaderTitle, DrawerHeaderTitleAction,
-    DrawerPosition, DrawerSize, OverlayDrawer, Select, SelectSize, Slider,
+    DrawerPosition, DrawerSize, OverlayDrawer, Select, SelectSize, Slider, Switch,
 };
 
 use crate::auth::AuthState;
@@ -272,32 +272,25 @@ fn AuthField(
 #[component]
 fn FieldError(error: Memo<Option<ValidationError>>) -> impl IntoView {
     let i18n = use_i18n();
+    let text = move || {
+        error
+            .get()
+            .map(|error| match error {
+                ValidationError::NameTooShort => t_string!(i18n, auth_name_short).to_string(),
+                ValidationError::NameTooLong => t_string!(i18n, auth_name_long).to_string(),
+                ValidationError::InvalidEmail => t_string!(i18n, auth_invalid_email).to_string(),
+                ValidationError::PasswordTooShort => {
+                    t_string!(i18n, auth_password_length).to_string()
+                }
+                ValidationError::PasswordMismatch => {
+                    t_string!(i18n, auth_password_mismatch).to_string()
+                }
+            })
+            .unwrap_or_default()
+    };
     view! {
         <Show when=move || error.get().is_some()>
-            <span class="field-error">
-                {move || {
-                    error
-                        .get()
-                        .map(|error| match error {
-                            ValidationError::NameTooShort => {
-                                t_string!(i18n, auth_name_short).to_string()
-                            }
-                            ValidationError::NameTooLong => {
-                                t_string!(i18n, auth_name_long).to_string()
-                            }
-                            ValidationError::InvalidEmail => {
-                                t_string!(i18n, auth_invalid_email).to_string()
-                            }
-                            ValidationError::PasswordTooShort => {
-                                t_string!(i18n, auth_password_length).to_string()
-                            }
-                            ValidationError::PasswordMismatch => {
-                                t_string!(i18n, auth_password_mismatch).to_string()
-                            }
-                        })
-                        .unwrap_or_default()
-                }}
-            </span>
+            <span class="field-error">{text}</span>
         </Show>
     }
 }
@@ -489,6 +482,13 @@ pub fn SettingsDrawer(
                             />
                             <span class="settings-slider__value">{explosion_delay_text}</span>
                         </div>
+                    </div>
+
+                    <div class="settings-field">
+                        <span class="settings-field__label">
+                            {t!(i18n, show_cell_borders)}
+                        </span>
+                        <Switch checked=ctx.show_cell_borders />
                     </div>
                 </section>
             </DrawerBody>

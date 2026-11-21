@@ -6,7 +6,7 @@
 //! Все сетевые зависимости опциональны (wasmgate), поэтому методы существуют
 //! на нативных сборках как заглушки.
 
-use forup_core::api::game::prelude::{BoardCode, CharacterId, MemberId, TeamId};
+use forup_core::api::game::prelude::{BoardCode, CharacterId, ExplosionMode, MemberId, TeamId};
 use forup_core::api::network::RoomId;
 use leptos::prelude::*;
 
@@ -251,12 +251,12 @@ impl GameSession {
         let _ = automatic;
     }
 
-    /// Взрывы без потерь.
-    pub fn net_set_lossless_explosions(&self, lossless: bool) {
+    /// Режим взрывов.
+    pub fn net_set_explosion_mode(&self, mode: ExplosionMode) {
         #[cfg(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr")))]
-        self.room_action("explosions", ExplosionRequest { lossless });
+        self.room_action("explosions", ExplosionRequest { mode });
         #[cfg(not(all(target_arch = "wasm32", any(feature = "hydrate", feature = "csr"))))]
-        let _ = lossless;
+        let _ = mode;
     }
 
     /// Квадрат безопасного радиуса стартовых клеток.

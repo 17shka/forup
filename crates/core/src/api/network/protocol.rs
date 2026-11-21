@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     auth::PlayerId,
-    game::{BoardCode, CharacterId, MemberId, TeamId},
+    game::{BoardCode, CharacterId, ExplosionMode, MemberId, TeamId},
     network::RoomId,
 };
 
@@ -64,7 +64,7 @@ pub struct LobbySetup {
     pub width: u8,
     pub height: u8,
     pub automatic: bool,
-    pub lossless: bool,
+    pub explosion_mode: ExplosionMode,
     pub radius_sq: u8,
     /// Команда собственного места создателя; `None` — он сидит без места
     /// и остаётся оператором комнаты.
@@ -142,10 +142,10 @@ pub struct DistributionRequest {
     pub automatic: bool,
 }
 
-/// Тело `POST /{id}/explosions`: взрывы без потерь.
+/// Тело `POST /{id}/explosions`: режим взрывов.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ExplosionRequest {
-    pub lossless: bool,
+    pub mode: ExplosionMode,
 }
 
 /// Тело `POST /{id}/radius`: квадрат безопасного радиуса стартовых клеток.

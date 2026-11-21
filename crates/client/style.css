@@ -148,6 +148,10 @@ body {
     order: 4;
 }
 
+.game-page .mode-toggle--actions {
+    order: 4;
+}
+
 .game-page .game-actions {
     order: 5;
 }
@@ -195,7 +199,7 @@ body {
 }
 
 .turn-banner__text--team {
-    color: hsl(var(--team-hue, 210) 68% 46%);
+    color: hsl(var(--team-hue, 210) 50% 50%);
 }
 
 /* Правый край баннера: переключатель режима прижат к правой стороне,
@@ -238,7 +242,7 @@ body {
 .game-message {
     padding: 8px 12px;
     border-radius: 8px;
-    background: rgba(239, 68, 68, 0.12);
+    background: rgba(239, 50, 50, 0.12);
     color: #ef4444;
     font-size: 13px;
 }
@@ -254,10 +258,10 @@ body {
     display: grid;
     grid-template-columns: repeat(var(--board-cols, 8), minmax(0, 1fr));
     grid-template-rows: repeat(var(--board-rows, 8), minmax(0, 1fr));
-    gap: 3px;
+    gap: 1%;
     width: min(100%, 520px);
     aspect-ratio: var(--board-cols, 8) / var(--board-rows, 8);
-    padding: 6px;
+    padding: 1%;
     border-radius: 12px;
     background: var(--colorNeutralBackground1);
     box-shadow: var(--shadow8);
@@ -271,8 +275,8 @@ body {
     min-width: 0;
     min-height: 0;
     padding: 0;
-    border: 1px solid var(--colorNeutralStroke2);
-    border-radius: 4px;
+    border: 0;
+    border-radius: 20%;
     background: var(--colorNeutralBackground3);
     color: #fff;
     font: inherit;
@@ -289,7 +293,34 @@ body {
         opacity 150ms ease;
 }
 
+/* Градиентная обводка: цвет зависит от близости value к порогу взрыва. */
+.board-cell::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 10%;
+    background: linear-gradient(
+        135deg,
+        var(--cell-border-start, #22c55e),
+        var(--cell-border-end, #22c55e)
+    );
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    opacity: var(--cell-border-opacity, 1);
+    pointer-events: none;
+    z-index: 1;
+}
+
 .board-cell__value {
+    position: relative;
+    z-index: 2;
     font-size: clamp(9px, 4vmin, 28px);
     /* 75% of the smaller cell side, whatever the board size. */
     font-size: 75cqmin;
@@ -301,8 +332,7 @@ body {
 }
 
 .board-cell--owned {
-    border-color: transparent;
-    background-color: hsl(var(--team-hue, 210) 68% 46%);
+    background-color: hsl(var(--team-hue, 210) 50% 50%);
     filter: brightness(var(--cell-brightness, 1));
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
 }
@@ -383,7 +413,10 @@ body {
     animation: cell-shrink-b 260ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-
+/* Скрываем обводку клеток когда настройка выключена. */
+.board--no-borders .board-cell::before {
+    display: none;
+}
 
 .team-legend {
     display: flex;
@@ -410,11 +443,11 @@ body {
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    background: hsl(var(--team-hue, 210) 68% 46%);
+    background: hsl(var(--team-hue, 210) 50% 50%);
 }
 
 /* Уменьшить/Увеличить — сегментированный переключатель режима хода,
-   собран по образцу Lossy/Lossless из настроек партии. */
+   собран по образцу переключателя режима взрывов из настроек партии. */
 
 .mode-toggle {
     --mode-decrease: #ef4444;
@@ -489,7 +522,7 @@ body {
 }
 
 /* Уменьшить — красный, увеличить — зелёный; у активной половины точка
-   перекрашивается в белый, как у Lossy/Lossless. */
+   перекрашивается в белый, как у переключателя режима взрывов. */
 .mode-toggle__option--decrease.mode-toggle__option--active {
     color: #fff;
     background: linear-gradient(135deg, #f87171, #dc2626);
@@ -606,7 +639,7 @@ body {
 }
 
 .team-card-wrap {
-    --team-color: hsl(var(--team-hue, 210) 68% 46%);
+    --team-color: hsl(var(--team-hue, 210) 50% 50%);
 }
 
 .team-card-wrap .thaw-card.team-card {
@@ -614,7 +647,7 @@ body {
     flex-direction: column;
     gap: 10px;
     border: 2px solid var(--team-color);
-    background: hsl(var(--team-hue, 210) 68% 46% / 0.1);
+    background: hsl(var(--team-hue, 210) 50% 50% / 0.1);
 }
 
 /* Команда, в которой все участники проиграли, тоже тусклее. */
@@ -656,16 +689,16 @@ body {
     gap: 6px;
     padding: 8px;
     border-radius: 10px;
-    background: hsl(var(--team-hue, 210) 68% 46% / 0.08);
+    background: hsl(var(--team-hue, 210) 50% 50% / 0.08);
 }
 
 .participant-row--next {
-    background: hsl(var(--team-hue, 210) 68% 46% / 0.18);
+    background: hsl(var(--team-hue, 210) 50% 50% / 0.18);
 }
 
 .participant-row--current {
-    background: hsl(var(--team-hue, 210) 68% 46% / 0.42);
-    box-shadow: inset 0 0 0 2px hsl(var(--team-hue, 210) 68% 46%);
+    background: hsl(var(--team-hue, 210) 50% 50% / 0.42);
+    box-shadow: inset 0 0 0 2px hsl(var(--team-hue, 210) 50% 50%);
 }
 
 /* Проигравший участник: карточка тусклее, чтобы сразу видно, кто выбыл. */
@@ -965,7 +998,7 @@ body {
 .auth-input--error,
 .auth-field--error .auth-input {
     border-color: #ef4444;
-    background: rgba(239, 68, 68, 0.06);
+    background: rgba(239, 50, 50, 0.06);
 }
 
 .auth-input--error:focus,
@@ -977,7 +1010,7 @@ body {
     margin: 0;
     padding: 8px 12px;
     border-radius: 8px;
-    background: rgba(239, 68, 68, 0.12);
+    background: rgba(239, 50, 50, 0.12);
     color: #ef4444;
     font-size: 13px;
 }
@@ -1241,7 +1274,7 @@ body {
 }
 
 .room-players__chip--admin {
-    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.5);
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 250, 0.5);
 }
 
 .room-players__ready {
@@ -1262,11 +1295,12 @@ body {
     font-size: 13px;
 }
 
-/* Lossy / Lossless red-green segmented toggle */
+/* Explosion mode segmented toggle */
 
 .explosion-toggle {
-    --explosion-lossy: #ef4444;
-    --explosion-lossless: #22c55e;
+    --explosion-dissipating: #ef4444;
+    --explosion-conserving: #22c55e;
+    --explosion-neighbor-based: #3b82f6;
     display: inline-flex;
     align-items: center;
     gap: 2px;
@@ -1322,22 +1356,31 @@ body {
         box-shadow 160ms ease;
 }
 
-.explosion-toggle__dot--lossy {
-    background: var(--explosion-lossy);
+.explosion-toggle__dot--dissipating {
+    background: var(--explosion-dissipating);
 }
 
-.explosion-toggle__dot--lossless {
-    background: var(--explosion-lossless);
+.explosion-toggle__dot--conserving {
+    background: var(--explosion-conserving);
 }
 
-.explosion-toggle__option--lossy.explosion-toggle__option--active {
+.explosion-toggle__dot--neighbor-based {
+    background: var(--explosion-neighbor-based);
+}
+
+.explosion-toggle__option--dissipating.explosion-toggle__option--active {
     color: #fff;
     background: linear-gradient(135deg, #f87171, #dc2626);
 }
 
-.explosion-toggle__option--lossless.explosion-toggle__option--active {
+.explosion-toggle__option--conserving.explosion-toggle__option--active {
     color: #fff;
     background: linear-gradient(135deg, #4ade80, #16a34a);
+}
+
+.explosion-toggle__option--neighbor-based.explosion-toggle__option--active {
+    color: #fff;
+    background: linear-gradient(135deg, #60a5fa, #2563eb);
 }
 
 .explosion-toggle__option--active .explosion-toggle__dot {
@@ -1427,7 +1470,13 @@ body {
         flex-shrink: 0;
     }
 
-    /* Кнопки действий закреплены внизу панели и не прокручиваются. */
+    /* Переключатель режима и кнопки действий — внизу панели,
+       не прокручиваются, режим над кнопками. */
+    .game-column--side .mode-toggle--actions {
+        order: 7;
+        flex: 0 0 auto;
+    }
+
     .game-column--side .game-actions {
         order: 8;
         flex: 0 0 auto;

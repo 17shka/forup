@@ -17,15 +17,18 @@ use serde::{Serialize, de::DeserializeOwned};
 ///
 /// serde здесь не нужен: это чисто клиентская логика поверх `RoomError`,
 /// который уже декодирован из ответа сервера.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum NetError {
     /// Сервер отклонил действие: бизнес-логика комнат.
     Room(RoomError),
     /// Сессия недействительна — игрок должен снова войти в аккаунт.
+    #[strum(serialize = "error_connection")]
     Unauthorized,
     /// Игрок был исключён из комнаты: его место исчезло из снапшота.
+    #[strum(serialize = "error_kicked")]
     Kicked,
     /// Транспорт: сеть, декодирование или неожиданный формат ответа.
+    #[strum(serialize = "error_connection")]
     Transport(String),
 }
 

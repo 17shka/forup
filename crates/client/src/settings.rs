@@ -18,6 +18,7 @@ pub const LANGUAGE_SYSTEM: &str = "system";
 
 const LANGUAGE_STORAGE_KEY: &str = "language";
 const EXPLOSION_DELAY_STORAGE_KEY: &str = "explosion_delay";
+const SHOW_CELL_BORDERS_STORAGE_KEY: &str = "show_cell_borders";
 
 /// Bounds of the pause between explosion waves, in seconds. `0` disables the
 /// step-by-step replay.
@@ -36,6 +37,8 @@ pub struct Settings {
     /// Pause between explosion waves, in seconds.
     pub explosion_delay: Signal<f64>,
     pub set_explosion_delay: WriteSignal<f64>,
+    /// Show gradient borders around board cells.
+    pub show_cell_borders: RwSignal<bool>,
 }
 
 impl Settings {
@@ -109,6 +112,27 @@ pub fn SettingsScope(children: Children) -> impl IntoView {
         }
     });
 
+    let (show_cell_borders, set_show_cell_borders, _) =
+        use_storage_with_options::<bool, FromToStringCodec>(
+            StorageType::Local,
+            SHOW_CELL_BORDERS_STORAGE_KEY.to_string(),
+            UseStorageOptions::default().initial_value(false),
+        );
+
+    let show_cell_borders_rw = RwSignal::new(show_cell_borders.get_untracked());
+    Effect::new(move |_| {
+        let val = show_cell_borders_rw.get();
+        if show_cell_borders.get_untracked() != val {
+            set_show_cell_borders.set(val);
+        }
+    });
+    Effect::new(move |_| {
+        let val = show_cell_borders.get();
+        if show_cell_borders_rw.get_untracked() != val {
+            show_cell_borders_rw.set(val);
+        }
+    });
+
     let system_locales = use_locales();
     let i18n = use_i18n();
 
@@ -130,6 +154,7 @@ pub fn SettingsScope(children: Children) -> impl IntoView {
         set_language,
         explosion_delay,
         set_explosion_delay,
+        show_cell_borders: show_cell_borders_rw,
     });
 
     view! {

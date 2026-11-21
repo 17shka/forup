@@ -63,7 +63,7 @@ impl Game {
                 scratch.clone_from(&self.board);
                 let steps = scratch.apply_move(pos, team, 1, self.explosion_mode);
                 let chain = (steps.saturating_sub(1) as Score) * cfg.chain_bonus;
-                let mut score = scratch.evaluate(team, cfg) + chain;
+                let mut score = scratch.evaluate(team, cfg, self.explosion_mode) + chain;
 
                 // With no owned cells, every empty cell scores equally. Break the
                 // tie by distance: prefer starting positions far from any enemy
